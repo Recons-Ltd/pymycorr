@@ -1,26 +1,56 @@
 # Mycorr-python
 
-### Dependencies installation :
+##  Dependencies Installation
 
-`poetry install`
+1.  **Install Poetry (if missing):**
+    ```bash
+    curl -sSL [https://install.python-poetry.org](https://install.python-poetry.org) | python3 -
+    ```
+
+2.  **Add Poetry to your PATH:**
+    ```bash
+    export PATH="$HOME/.poetry/bin:$PATH"
+    ```
+
+3.  **Verify installation:**
+    ```bash
+    poetry --version
+    ```
+
+4.  **Install project dependencies:**
+    ```bash
+    poetry install
+    ```
+
+5.  **Add Poetry shell plugin:**
+    ```bash
+    poetry self add poetry-plugin-shell
+    ```
+
+---
+
+6.  **Activate virtual environment:**
+    ```bash
+    poetry shell
+    ```
 
 ### Virtual environment activation :
-
-`poetry shell`
 
 Run this command the first time only to register the environment as a Jupyter kernel:
 
 `python -m ipykernel install --user --name=mycorr --display-name "Python (mycorr)"`
 
+---
+
 ### Usage :
 
 `poetry run jupyter notebook`
 
-
 Then:
 
-- Open main.ipynb
-
-- Select Python (mycorr) kernel
-
+- Open **main.ipynb**
+- Select **Python (mycorr)** kernel
 - All set, run the cells!
+
+---
+:warning: **Make sure to copy the fullchain.pem form mycorr to the ./certs/ directory.**

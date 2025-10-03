@@ -1,40 +1,46 @@
-import os
 import asyncio
-import warnings
 from typing import Optional, Union
-
 import aiohttp
 import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pyarrow.ipc as ipc
-from IPython.display import HTML, display
+import nest_asyncio
+import ssl
+from urllib.parse import urlparse
 
-
+# Exceptions
 class TableAPIError(Exception):
     """Base exception for table API errors"""
     pass
 
-
 class TableNotFoundError(TableAPIError):
     """Raised when table is not found"""
     pass
-
 
 class TableConversionError(TableAPIError):
     """Raised when table conversion fails"""
     pass
 
 
+def get_ssl_context(use_local_cert: bool = False):
+    """Create SSL context for either local development or cloud (GCP-managed certs)."""
+    if use_local_cert:
+        return ssl.create_default_context(cafile="./certs/fullchain.pem")
+    # For deployed environments (e.g. GCP) rely on system CA store
+    return ssl.create_default_context()
+
+
 class MyCorr:
     """Client for fetching table data from API with Arrow format support"""
     
-    def __init__(self, url: str, token: str):
+    def __init__(self, url: str, token: str, local_dev: Optional[bool] = None):
         """Initialize the client with authentication token and API URL
         
         Args:
             token: Authentication token for API access
             url: API base URL
+            local_dev: Force using local certs (True/False). If None, autodetect from URL.
             
         Raises:
             ValueError: If token or url is empty
@@ -45,8 +51,16 @@ class MyCorr:
         if not url:
             raise ValueError("API URL is required")
         
-        self.url = url
+        self.url = url.rstrip("/")  # ensure no trailing slash
         self.token = token
+
+        # Auto-detect if not explicitly set
+        if local_dev is None:
+            parsed = urlparse(self.url)
+            hostname = parsed.hostname or ""
+            self.local_dev = hostname in ("localhost", "127.0.0.1")
+        else:
+            self.local_dev = local_dev
 
     async def get_data_stream(
         self, 
@@ -69,42 +83,40 @@ class MyCorr:
         """
         if not table_id:
             raise ValueError("Table ID is required")
-        
-        # Set default version if none provided
+
         if version is None:
-            version = 'latest'
-        
+            version = "latest"
+
         params = {"table_id": table_id, "scope": "read"}
-        
-        # Use isinstance to determine if version is int or str
         if isinstance(version, int):
             params["version"] = version
         elif isinstance(version, str):
             params["version_alias"] = version
         else:
-            raise TypeError(f"Expected 'version' to be int, str, or None, got {type(version).__name__}")
+            raise TypeError(f"Expected version int|str|None, got {type(version).__name__}")
 
-        timeout = aiohttp.ClientTimeout(total=300) 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        ssl_context = get_ssl_context(use_local_cert=self.local_dev)
+
+        async with aiohttp.ClientSession() as session:
             async with session.get(
                 f"{self.url}/stream",
-                headers={
-                    "Authorization": f"Bearer {self.token}", 
-                    "Accept": "application/vnd.apache.arrow.stream"
-                },
-                params=params
+                headers={"Authorization": f"Bearer {self.token}",  
+                         "Accept": "application/vnd.apache.arrow.stream"},
+                                params=params,
+                ssl=ssl_context   
             ) as response:
                 if response.status != 200:
                     try:
                         error = await response.json()
-                        error_msg = error.get('message', 'Internal server error')
+                        error_msg = error.get("message", "Internal server error")
                     except Exception:
                         error_msg = f"HTTP {response.status}"
                     raise TableAPIError(f"Error fetching table: {error_msg}")
-                
+
+                raw_bytes = await response.read()
                 try:
-                    stream = await response.read()
-                    return ipc.open_stream(stream).read_all()
+                    reader = pa.BufferReader(raw_bytes)
+                    return ipc.open_stream(reader).read_all()
                 except (pa.ArrowInvalid, pa.ArrowIOError) as e:
                     raise TableAPIError(f"Arrow parsing error: {str(e)}")
 
@@ -137,15 +149,11 @@ class MyCorr:
             raise ValueError(f"Engine must be 'pandas' or 'polars', got '{engine}'")
         
         async def get_dataframe_async():
-            """Internal async function to fetch and convert data"""
             data_stream = await self.get_data_stream(table_id, version)
-            
             try:
                 if engine == "pandas":
                     if len(data_stream) == 0:
-                        #here since pandas doesn't visualize empty frames print a message
-                        print(
-                            f"Table is empty with schema: {data_stream.schema}")
+                        print(f"Table is empty with schema: {data_stream.schema}")
                     return data_stream.to_pandas()
                 else: 
                     return pl.from_arrow(data_stream)
@@ -159,7 +167,7 @@ class MyCorr:
         
         if loop.is_running():
             try:
-                import nest_asyncio
+             
                 nest_asyncio.apply()
                 return loop.run_until_complete(get_dataframe_async())
             except ImportError:
