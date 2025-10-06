@@ -4,12 +4,13 @@
 
 1.  **Install Poetry (if missing):**
     ```bash
-    curl -sSL [https://install.python-poetry.org](https://install.python-poetry.org) | python3 -
+    curl -sSL https://install.python-poetry.org | python3 -
+
     ```
 
 2.  **Add Poetry to your PATH:**
     ```bash
-    export PATH="$HOME/.poetry/bin:$PATH"
+    export PATH="$HOME/.local/bin:$PATH"
     ```
 
 3.  **Verify installation:**
@@ -33,7 +34,6 @@
     ```bash
     poetry shell
     ```
-
 ### Virtual environment activation :
 
 Run this command the first time only to register the environment as a Jupyter kernel:
@@ -51,6 +51,3 @@ Then:
 - Open **main.ipynb**
 - Select **Python (mycorr)** kernel
 - All set, run the cells!
-
----
-:warning: **Make sure to copy the fullchain.pem form mycorr to the ./certs/ directory.**
