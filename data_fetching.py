@@ -1,6 +1,5 @@
 import os
 import asyncio
-import warnings
 from typing import Optional, Union
 
 import aiohttp
