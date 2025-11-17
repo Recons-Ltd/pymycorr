@@ -38,13 +38,16 @@
 
 Run this command the first time only to register the environment as a Jupyter kernel:
 
-`python -m ipykernel install --user --name=mycorr --display-name "Python (mycorr)"`
+```bash 
+python -m ipykernel install --user --name=mycorr --display-name "Python (mycorr)"
+ ```
 
 ---
 
 ### Usage :
-
-`poetry run jupyter notebook`
+```bash 
+poetry run jupyter notebook
+```
 
 Then:
 
