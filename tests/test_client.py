@@ -60,9 +60,7 @@ class TestGetDataStream:
             await client.get_data_stream("table-id", version=1.5)  # type: ignore
 
     @pytest.mark.asyncio
-    async def test_successful_fetch(
-        self, client: MyCorr, sample_arrow_table: pa.Table
-    ) -> None:
+    async def test_successful_fetch(self, client: MyCorr, sample_arrow_table: pa.Table) -> None:
         """Test successful data fetch."""
         # Serialize arrow table to bytes
         sink = pa.BufferOutputStream()
@@ -114,9 +112,7 @@ class TestGetDataStream:
                 await client.get_data_stream("test-table")
 
     @pytest.mark.asyncio
-    async def test_version_int_param(
-        self, client: MyCorr, sample_arrow_table: pa.Table
-    ) -> None:
+    async def test_version_int_param(self, client: MyCorr, sample_arrow_table: pa.Table) -> None:
         """Test that integer version is passed as 'version' param."""
         sink = pa.BufferOutputStream()
         writer = ipc.new_stream(sink, sample_arrow_table.schema)
@@ -140,9 +136,7 @@ class TestGetDataStream:
             assert params.get("version") == 2
 
     @pytest.mark.asyncio
-    async def test_version_string_param(
-        self, client: MyCorr, sample_arrow_table: pa.Table
-    ) -> None:
+    async def test_version_string_param(self, client: MyCorr, sample_arrow_table: pa.Table) -> None:
         """Test that string version is passed as 'version_alias' param."""
         sink = pa.BufferOutputStream()
         writer = ipc.new_stream(sink, sample_arrow_table.schema)
@@ -177,9 +171,7 @@ class TestGetTableInfo:
     ) -> None:
         """Test that get_table_info returns correct structure."""
 
-        async def mock_get_data_stream(
-            table_id: str, version: int | str | None = None
-        ) -> pa.Table:
+        async def mock_get_data_stream(table_id: str, version: int | str | None = None) -> pa.Table:
             return sample_arrow_table
 
         monkeypatch.setattr(client, "get_data_stream", mock_get_data_stream)

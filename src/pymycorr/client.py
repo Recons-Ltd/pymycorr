@@ -76,14 +76,17 @@ class MyCorr:
             )
 
         timeout = aiohttp.ClientTimeout(total=300)
-        async with aiohttp.ClientSession(timeout=timeout) as session, session.get(
-            f"{self.url}/stream",
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/vnd.apache.arrow.stream",
-            },
-            params=params,
-        ) as response:
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.get(
+                f"{self.url}/stream",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Accept": "application/vnd.apache.arrow.stream",
+                },
+                params=params,
+            ) as response,
+        ):
             if response.status != 200:
                 try:
                     error = await response.json()
@@ -134,7 +137,6 @@ class MyCorr:
 
             try:
                 if engine == "pandas":
-
                     if len(data_stream) == 0:
                         print(f"Table is empty with schema: {data_stream.schema}")
                     return data_stream.to_pandas()
@@ -166,9 +168,7 @@ class MyCorr:
         else:
             return loop.run_until_complete(get_dataframe_async())
 
-    def get_table_info(
-        self, table_id: str, version: int | str | None = None
-    ) -> dict[str, Any]:
+    def get_table_info(self, table_id: str, version: int | str | None = None) -> dict[str, Any]:
         """Get table schema and metadata without fetching full data.
 
         Args:
