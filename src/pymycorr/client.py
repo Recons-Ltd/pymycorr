@@ -47,8 +47,7 @@ class MyCorr:
         """
         load_dotenv(dotenv_path=env_file)
 
-        self.url = (url or os.getenv("MYCORR_API_URL")
-                    or self.DEFAULT_URL).rstrip("/")
+        self.url = (url or os.getenv("MYCORR_API_URL") or self.DEFAULT_URL).rstrip("/")
         self.token = token or os.getenv("MYCORR_API_TOKEN")
 
         if not self.token:
@@ -142,13 +141,12 @@ class MyCorr:
             TableConversionError: If conversion to DataFrame fails.
         """
         # Validate input parameters
-        if version is not None and not isinstance(version, (int, str)):
+        if version is not None and not isinstance(version, int | str):
             raise TypeError(
                 f"Expected 'version' to be int, str, or None, got {type(version).__name__}"
             )
         if engine not in ("pandas", "polars"):
-            raise ValueError(
-                f"Engine must be 'pandas' or 'polars', got '{engine}'")
+            raise ValueError(f"Engine must be 'pandas' or 'polars', got '{engine}'")
 
         async def get_dataframe_async() -> pd.DataFrame | pl.DataFrame:
             """Internal async function to fetch and convert data."""
@@ -157,8 +155,7 @@ class MyCorr:
             try:
                 if engine == "pandas":
                     if len(data_stream) == 0:
-                        print(
-                            f"Table is empty with schema: {data_stream.schema}")
+                        print(f"Table is empty with schema: {data_stream.schema}")
                     return data_stream.to_pandas()
                 else:
                     import polars as pl_module

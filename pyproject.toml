@@ -83,6 +83,10 @@ warn_unused_configs = true
 module = ["pyarrow.*", "aiohttp.*", "polars.*", "pandas.*", "nest_asyncio.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_decorators = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
