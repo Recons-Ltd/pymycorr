@@ -1,6 +1,7 @@
 """Tests for the MyCorr client."""
 
 import re
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.ipc as ipc
@@ -13,21 +14,71 @@ from pymycorr import MyCorr, TableAPIError
 class TestMyCorrrInit:
     """Tests for MyCorr initialization."""
 
-    def test_init_valid(self) -> None:
-        """Test valid initialization."""
+    def test_init_with_explicit_params(self) -> None:
+        """Test initialization with explicit url and token."""
         client = MyCorr(url="https://api.example.com", token="my-token")
         assert client.url == "https://api.example.com"
         assert client.token == "my-token"
 
-    def test_init_empty_token_raises(self) -> None:
-        """Test that empty token raises ValueError."""
-        with pytest.raises(ValueError, match="Authentication token is required"):
-            MyCorr(url="https://api.example.com", token="")
+    def test_init_from_env_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test initialization from environment variables."""
+        monkeypatch.setenv("MYCORR_API_URL", "https://env.example.com")
+        monkeypatch.setenv("MYCORR_API_TOKEN", "env-token")
 
-    def test_init_empty_url_raises(self) -> None:
-        """Test that empty URL raises ValueError."""
-        with pytest.raises(ValueError, match="API URL is required"):
-            MyCorr(url="", token="my-token")
+        client = MyCorr()
+        assert client.url == "https://env.example.com"
+        assert client.token == "env-token"
+
+    def test_init_with_default_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test initialization uses default URL when not specified."""
+        monkeypatch.delenv("MYCORR_API_URL", raising=False)
+        monkeypatch.setenv("MYCORR_API_TOKEN", "my-token")
+
+        client = MyCorr()
+        assert client.url == "https://api.mycorr.recons-ltd.com"
+        assert client.token == "my-token"
+
+    def test_init_strips_trailing_slash(self) -> None:
+        """Test that trailing slash is stripped from URL."""
+        client = MyCorr(url="https://api.example.com/", token="my-token")
+        assert client.url == "https://api.example.com"
+
+    def test_init_explicit_overrides_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test that explicit params override environment variables."""
+        monkeypatch.setenv("MYCORR_API_URL", "https://env.example.com")
+        monkeypatch.setenv("MYCORR_API_TOKEN", "env-token")
+
+        client = MyCorr(url="https://explicit.example.com", token="explicit-token")
+        assert client.url == "https://explicit.example.com"
+        assert client.token == "explicit-token"
+
+    def test_init_from_env_file(self, tmp_path: Path) -> None:
+        """Test initialization from custom .env file."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("MYCORR_API_URL=https://file.example.com\nMYCORR_API_TOKEN=file-token")
+
+        client = MyCorr(env_file=env_file)
+        assert client.url == "https://file.example.com"
+        assert client.token == "file-token"
+
+    def test_init_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test that missing token raises ValueError."""
+        monkeypatch.delenv("MYCORR_API_URL", raising=False)
+        monkeypatch.delenv("MYCORR_API_TOKEN", raising=False)
+
+        with pytest.raises(ValueError, match="token is required"):
+            MyCorr(url="https://api.example.com")
+
+    def test_init_empty_string_params_fall_back_to_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that empty string params don't override env vars."""
+        monkeypatch.setenv("MYCORR_API_URL", "https://env.example.com")
+        monkeypatch.setenv("MYCORR_API_TOKEN", "env-token")
+
+        client = MyCorr(url="", token="")
+        assert client.url == "https://env.example.com"
+        assert client.token == "env-token"
 
 
 class TestGetTable:
@@ -71,7 +122,7 @@ class TestGetDataStream:
 
         with aioresponses() as m:
             # Use pattern to match URL with any query params
-            pattern = re.compile(r"^https://test\.example\.com/api/stream\?.*$")
+            pattern = re.compile(r"^https://test\.example\.com/api/data/table/stream\?.*$")
             m.get(
                 pattern,
                 body=arrow_bytes,
@@ -87,7 +138,7 @@ class TestGetDataStream:
     async def test_api_error_response(self, client: MyCorr) -> None:
         """Test handling of API error response."""
         with aioresponses() as m:
-            pattern = re.compile(r"^https://test\.example\.com/api/stream\?.*$")
+            pattern = re.compile(r"^https://test\.example\.com/api/data/table/stream\?.*$")
             m.get(
                 pattern,
                 payload={"message": "Table not found"},
@@ -101,7 +152,7 @@ class TestGetDataStream:
     async def test_api_error_no_json(self, client: MyCorr) -> None:
         """Test handling of API error without JSON body."""
         with aioresponses() as m:
-            pattern = re.compile(r"^https://test\.example\.com/api/stream\?.*$")
+            pattern = re.compile(r"^https://test\.example\.com/api/data/table/stream\?.*$")
             m.get(
                 pattern,
                 body="Internal Server Error",
@@ -121,7 +172,7 @@ class TestGetDataStream:
         arrow_bytes = sink.getvalue().to_pybytes()
 
         with aioresponses() as m:
-            pattern = re.compile(r"^https://test\.example\.com/api/stream\?.*$")
+            pattern = re.compile(r"^https://test\.example\.com/api/data/table/stream\?.*$")
             m.get(
                 pattern,
                 body=arrow_bytes,
@@ -145,7 +196,7 @@ class TestGetDataStream:
         arrow_bytes = sink.getvalue().to_pybytes()
 
         with aioresponses() as m:
-            pattern = re.compile(r"^https://test\.example\.com/api/stream\?.*$")
+            pattern = re.compile(r"^https://test\.example\.com/api/data/table/stream\?.*$")
             m.get(
                 pattern,
                 body=arrow_bytes,

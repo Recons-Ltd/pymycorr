@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "aiohttp>=3.9.0",
     "pyarrow>=14.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -81,6 +82,10 @@ warn_unused_configs = true
 [[tool.mypy.overrides]]
 module = ["pyarrow.*", "aiohttp.*", "polars.*", "pandas.*", "nest_asyncio.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_decorators = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
