@@ -8,7 +8,6 @@ Python client for fetching table data from the MyCorr API using Apache Arrow for
 
 ## Features
 
-- Async and sync APIs for fetching table data
 - Native support for both pandas and polars DataFrames
 - Efficient Arrow IPC streaming for large datasets
 - Full type hints for IDE support
@@ -31,15 +30,47 @@ pip install pymycorr[all]
 pip install pymycorr[all,jupyter]
 ```
 
+## Configuration
+
+Set your API token as an environment variable:
+
+```bash
+export MYCORR_API_TOKEN="your-api-token"
+```
+
+Optionally, you can also set the API URL:
+
+```bash
+export MYCORR_API_URL="https://api.mycorr.com/data/table"
+```
+
+Or create a `.env` file in your project root:
+
+```
+MYCORR_API_TOKEN=your-api-token
+MYCORR_API_URL=https://api.mycorr.com/data/table
+```
+
+The client automatically loads from environment variables and `.env` files.
+
 ## Quick Start
 
 ```python
 from pymycorr import MyCorr
 
-# Initialize client with your API URL and token
+# Initialize client (loads token from MYCORR_API_TOKEN env var or .env file)
+client = MyCorr(url="https://api.mycorr.com/data/table")
+
+# Or with explicit credentials
 client = MyCorr(
     url="https://api.mycorr.com/data/table",
     token="your-api-token"
+)
+
+# Or specify a custom .env file
+client = MyCorr(
+    url="https://api.mycorr.com/data/table",
+    env_file="/path/to/.env"
 )
 
 # Fetch as pandas DataFrame (default)
@@ -60,38 +91,17 @@ print(info["schema"])
 print(info["num_rows"])
 ```
 
-## Async Usage
-
-```python
-import asyncio
-from pymycorr import MyCorr
-
-async def main():
-    client = MyCorr(
-        url="https://api.mycorr.com/data/table",
-        token="your-api-token"
-    )
-
-    # Get raw Arrow table
-    arrow_table = await client.get_data_stream("table-id")
-
-    # Convert to pandas
-    df = arrow_table.to_pandas()
-    return df
-
-df = asyncio.run(main())
-```
-
 ## API Reference
 
 ### MyCorr
 
-#### `__init__(url: str, token: str)`
+#### `__init__(url: str, token: str = None, env_file: str = None)`
 
 Initialize the client.
 
 - `url`: API base URL
-- `token`: Authentication token (Bearer token from MyCorr UI)
+- `token`: Authentication token (Bearer token from MyCorr UI). If not provided, loads from `MYCORR_API_TOKEN` environment variable or `.env` file.
+- `env_file`: Path to custom `.env` file (optional)
 
 #### `get_table(table_id, version=None, engine="pandas")`
 
@@ -101,14 +111,6 @@ Fetch table data as a DataFrame.
 - `version`: Version number (int) or alias (str like `"latest"`, `"stable"`)
 - `engine`: `"pandas"` or `"polars"`
 - Returns: pandas or polars DataFrame
-
-#### `get_data_stream(table_id, version=None)` *(async)*
-
-Fetch raw Arrow table asynchronously.
-
-- `table_id`: Unique identifier for the table
-- `version`: Version number (int) or alias (str)
-- Returns: PyArrow Table
 
 #### `get_table_info(table_id, version=None)`
 

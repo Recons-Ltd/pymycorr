@@ -6,11 +6,11 @@ import asyncio
 import os
 import queue
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Coroutine, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
-import aiohttp
+import httpx
 import pyarrow as pa
 import pyarrow.ipc as ipc
 from dotenv import load_dotenv
@@ -20,6 +20,89 @@ from pymycorr.exceptions import StreamingError, TableConversionError
 if TYPE_CHECKING:
     import pandas as pd
     import polars as pl
+
+T = TypeVar("T")
+
+
+class _IPCStreamBuffer:
+    """Accumulates HTTP chunks and yields complete IPC streams.
+
+    The server sends multiple complete Arrow IPC streams (one per batch),
+    each terminated by an EOS marker. This class buffers incoming HTTP chunks
+    and yields complete IPC streams as they are detected.
+
+    Note: The EOS marker bytes could appear within Arrow data, so we validate
+    each candidate stream can actually be parsed before yielding it.
+    """
+
+    EOS_MARKER = b"\xff\xff\xff\xff\x00\x00\x00\x00"
+    EOS_LEN = 8
+
+    def __init__(self, max_buffer_size: int | None = None) -> None:
+        """Initialize the buffer.
+
+        Args:
+            max_buffer_size: Maximum buffer size in bytes before raising error.
+                None for unlimited.
+        """
+        self._buffer = bytearray()
+        self._max_buffer_size = max_buffer_size
+        self.total_bytes = 0
+        self.streams_parsed = 0
+
+    def _is_valid_ipc_stream(self, data: bytes) -> bool:
+        """Check if data is a valid, complete IPC stream."""
+        try:
+            reader = ipc.open_stream(data)
+            reader.read_all()  # Validates the entire stream
+            return True
+        except (pa.ArrowInvalid, pa.ArrowIOError):
+            return False
+
+    def add_chunk(self, chunk: bytes) -> Iterator[bytes]:
+        """Add HTTP chunk and yield any complete IPC streams found.
+
+        Args:
+            chunk: Raw bytes from HTTP response.
+
+        Yields:
+            Complete IPC stream bytes (including EOS marker).
+
+        Raises:
+            StreamingError: If buffer exceeds max_buffer_size.
+        """
+        self._buffer.extend(chunk)
+        self.total_bytes += len(chunk)
+
+        if self._max_buffer_size and len(self._buffer) > self._max_buffer_size:
+            raise StreamingError(
+                f"Buffer exceeded {self._max_buffer_size} bytes - possible malformed stream"
+            )
+
+        # Search for EOS markers, but validate each candidate is a real IPC stream
+        search_start = 0
+        while True:
+            eos_pos = self._buffer.find(self.EOS_MARKER, search_start)
+            if eos_pos == -1:
+                break
+
+            stream_end = eos_pos + self.EOS_LEN
+            candidate_stream = bytes(self._buffer[:stream_end])
+
+            if self._is_valid_ipc_stream(candidate_stream):
+                # Valid stream found - yield it and remove from buffer
+                del self._buffer[:stream_end]
+                self.streams_parsed += 1
+                yield candidate_stream
+                search_start = 0  # Reset search for next stream
+            else:
+                # False positive - EOS marker bytes appeared in data
+                # Continue searching after this position
+                search_start = eos_pos + 1
+
+    def remaining(self) -> bytes:
+        """Return any leftover buffer data after stream ends."""
+        return bytes(self._buffer)
 
 
 class MyCorr:
@@ -59,7 +142,69 @@ class MyCorr:
                 "token is required (pass explicitly or set MYCORR_API_TOKEN environment variable)"
             )
 
-    async def get_data_stream(
+    def _run_sync(self, coro: Coroutine[Any, Any, T]) -> T:
+        """Run an async coroutine from a sync context.
+
+        Handles detection of running event loops and applies nest_asyncio
+        when needed (e.g., in Jupyter notebooks).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        if loop.is_running():
+            try:
+                import nest_asyncio
+
+                nest_asyncio.apply()
+                return loop.run_until_complete(coro)
+            except ImportError as e:
+                raise RuntimeError(
+                    "nest_asyncio is required when calling from within an async context "
+                    "(e.g., Jupyter notebooks). Install with: pip install nest-asyncio"
+                ) from e
+        return loop.run_until_complete(coro)
+
+    @staticmethod
+    def _build_version_params(
+        table_id: str,
+        version: int | str | None,
+        *,
+        include_scope: bool = True,
+    ) -> dict[str, Any]:
+        """Build query params dict for version specification.
+
+        Args:
+            table_id: The table identifier.
+            version: Version number (int), alias (str), or None for 'latest'.
+            include_scope: Whether to include scope='read' in params.
+
+        Returns:
+            Dict with table_id, version/version_alias, and optionally scope.
+
+        Raises:
+            TypeError: If version has an invalid type.
+        """
+        if version is None:
+            version = "latest"
+
+        params: dict[str, Any] = {"table_id": table_id}
+        if include_scope:
+            params["scope"] = "read"
+
+        if isinstance(version, int):
+            params["version"] = version
+        elif isinstance(version, str):
+            params["version_alias"] = version
+        else:
+            raise TypeError(
+                f"Expected 'version' to be int, str, or None, got {type(version).__name__}"
+            )
+
+        return params
+
+    async def _get_data_stream(
         self,
         table_id: str,
         version: int | str | None = None,
@@ -78,7 +223,7 @@ class MyCorr:
             TableAPIError: For API or parsing errors.
         """
         batches = []
-        async for batch in self.stream_record_batches(table_id, version):
+        async for batch in self._stream_record_batches(table_id, version):
             batches.append(batch)
 
         if not batches:
@@ -86,15 +231,18 @@ class MyCorr:
 
         return pa.Table.from_batches(batches)
 
-    async def stream_record_batches(
+    async def _stream_record_batches(
         self,
         table_id: str,
         version: int | str | None = None,
     ) -> AsyncIterator[pa.RecordBatch]:
         """Stream Arrow record batches from API asynchronously.
 
-        Yields individual RecordBatch objects as they arrive from the server,
+        Yields individual RecordBatch objects as they arrive over the network,
         allowing processing of large tables without loading everything into memory.
+
+        Uses true network-level streaming: batches are yielded as soon as each
+        complete IPC stream arrives, rather than waiting for the entire response.
 
         Args:
             table_id: Unique identifier for the table.
@@ -110,89 +258,64 @@ class MyCorr:
         if not table_id:
             raise ValueError("Table ID is required")
 
-        if version is None:
-            version = "latest"
-
-        params: dict[str, Any] = {"table_id": table_id, "scope": "read"}
-
-        if isinstance(version, int):
-            params["version"] = version
-        elif isinstance(version, str):
-            params["version_alias"] = version
-        else:
-            raise TypeError(
-                f"Expected 'version' to be int, str, or None, got {type(version).__name__}"
-            )
+        params = self._build_version_params(table_id, version)
 
         batches_received = 0
-        timeout = aiohttp.ClientTimeout(total=None, sock_read=300)
-        ssl_context: bool = self._verify_ssl
+        timeout = httpx.Timeout(timeout=300.0, connect=30.0)
+        buffer = _IPCStreamBuffer(max_buffer_size=100 * 1024 * 1024)  # 100MB
 
         try:
             async with (
-                aiohttp.ClientSession(timeout=timeout) as session,
-                session.get(
+                httpx.AsyncClient(timeout=timeout, verify=self._verify_ssl) as client,
+                client.stream(
+                    "GET",
                     f"{self.url}/data/table/stream",
                     headers={
                         "Authorization": f"Bearer {self.token}",
                         "Accept": "application/vnd.apache.arrow.stream",
                     },
                     params=params,
-                    ssl=ssl_context,
                 ) as response,
             ):
-                if response.status != 200:
+                if response.status_code != 200:
+                    await response.aread()
                     try:
-                        error = await response.json()
+                        error = response.json()
                         error_msg = error.get("message", "Internal server error")
                     except Exception:
-                        error_msg = f"HTTP {response.status}"
+                        error_msg = f"HTTP {response.status_code}"
                     raise StreamingError(f"Error fetching table: {error_msg}")
 
-                # Read full response
-                data = await response.read()
-                if not data:
-                    return
+                # True streaming: process chunks as they arrive
+                async for chunk in response.aiter_bytes():
+                    for complete_ipc_stream in buffer.add_chunk(chunk):
+                        try:
+                            reader = ipc.open_stream(complete_ipc_stream)
+                            table = reader.read_all()
+                            for batch in table.to_batches():
+                                batches_received += 1
+                                yield batch
+                        except (pa.ArrowInvalid, pa.ArrowIOError) as e:
+                            raise StreamingError(
+                                f"Failed to parse IPC stream: {e}",
+                                batches_received=batches_received,
+                            ) from e
 
-                # Try parsing as a single IPC stream first
-                try:
-                    table = ipc.open_stream(data).read_all()
-                    for batch in table.to_batches():
-                        batches_received += 1
-                        yield batch
-                    return
-                except (pa.ArrowInvalid, pa.ArrowIOError):
-                    pass  # Fall through to multi-stream parsing
+                # Check for incomplete stream at end
+                remaining = buffer.remaining()
+                if remaining:
+                    raise StreamingError(
+                        f"Stream ended with {len(remaining)} bytes of incomplete data",
+                        batches_received=batches_received,
+                    )
 
-                # The backend sends multiple complete IPC streams (one per batch)
-                eos_marker = b"\xff\xff\xff\xff\x00\x00\x00\x00"
-                offset = 0
-
-                while offset < len(data):
-                    eos_pos = data.find(eos_marker, offset)
-                    if eos_pos == -1:
-                        break
-
-                    stream_end = eos_pos + len(eos_marker)
-                    complete_stream = data[offset:stream_end]
-                    offset = stream_end
-
-                    try:
-                        reader = ipc.open_stream(complete_stream)
-                        table = reader.read_all()
-                        for batch in table.to_batches():
-                            batches_received += 1
-                            yield batch
-                    except (pa.ArrowInvalid, pa.ArrowIOError):
-                        continue
-
-        except aiohttp.ClientError as e:
+        except httpx.HTTPError as e:
             raise StreamingError(
                 f"Connection error after {batches_received} batches: {e!s}",
                 batches_received=batches_received,
             ) from e
 
-    def iter_record_batches(
+    def _iter_record_batches(
         self,
         table_id: str,
         version: int | str | None = None,
@@ -222,27 +345,11 @@ class MyCorr:
             has_running_loop = False
 
         if has_running_loop:
-            # In Jupyter or async context - use nest_asyncio fallback
-            try:
-                import nest_asyncio
-
-                nest_asyncio.apply()
-            except ImportError as e:
-                raise RuntimeError(
-                    "nest_asyncio is required when calling from within an async context "
-                    "(e.g., Jupyter notebooks). Install with: pip install nest-asyncio"
-                ) from e
-
-            # Collect all batches and yield
+            # In Jupyter or async context - collect all batches via _run_sync
             async def collect() -> list[pa.RecordBatch]:
-                batches = []
-                async for batch in self.stream_record_batches(table_id, version):
-                    batches.append(batch)
-                return batches
+                return [batch async for batch in self._stream_record_batches(table_id, version)]
 
-            loop = asyncio.get_event_loop()
-            batches = loop.run_until_complete(collect())
-            yield from batches
+            yield from self._run_sync(collect())
         else:
             # No running loop - use thread + queue for true streaming
             yield from self._sync_stream_batches(table_id, version)
@@ -258,7 +365,7 @@ class MyCorr:
         def producer() -> None:
             async def fetch() -> None:
                 try:
-                    async for batch in self.stream_record_batches(table_id, version):
+                    async for batch in self._stream_record_batches(table_id, version):
                         batch_queue.put(batch)
                     batch_queue.put(None)  # Signal completion
                 except Exception as e:
@@ -279,7 +386,7 @@ class MyCorr:
 
         thread.join()
 
-    def stream_to_dataframes(
+    def _stream_to_dataframes(
         self,
         table_id: str,
         version: int | str | None = None,
@@ -306,7 +413,7 @@ class MyCorr:
         if engine not in ("pandas", "polars"):
             raise ValueError(f"Engine must be 'pandas' or 'polars', got '{engine}'")
 
-        for batch in self.iter_record_batches(table_id, version):
+        for batch in self._iter_record_batches(table_id, version):
             try:
                 if engine == "pandas":
                     # Convert batch to table first to ensure DataFrame output
@@ -343,17 +450,12 @@ class MyCorr:
             TableAPIError: For API-related errors.
             TableConversionError: If conversion to DataFrame fails.
         """
-        # Validate input parameters
-        if version is not None and not isinstance(version, int | str):
-            raise TypeError(
-                f"Expected 'version' to be int, str, or None, got {type(version).__name__}"
-            )
         if engine not in ("pandas", "polars"):
             raise ValueError(f"Engine must be 'pandas' or 'polars', got '{engine}'")
 
         async def get_dataframe_async() -> pd.DataFrame | pl.DataFrame:
             """Internal async function to fetch and convert data."""
-            data_stream = await self.get_data_stream(table_id, version)
+            data_stream = await self._get_data_stream(table_id, version)
 
             try:
                 if engine == "pandas":
@@ -369,24 +471,7 @@ class MyCorr:
                     f"Failed to convert table to {engine} format: {e!s}"
                 ) from e
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(get_dataframe_async())
-
-        if loop.is_running():
-            try:
-                import nest_asyncio
-
-                nest_asyncio.apply()
-                return loop.run_until_complete(get_dataframe_async())
-            except ImportError as e:
-                raise RuntimeError(
-                    "nest_asyncio is required when calling from within an async context "
-                    "(e.g., Jupyter notebooks). Install with: pip install nest-asyncio"
-                ) from e
-        else:
-            return loop.run_until_complete(get_dataframe_async())
+        return self._run_sync(get_dataframe_async())
 
     def get_table_info(self, table_id: str, version: int | str | None = None) -> dict[str, Any]:
         """Get table schema and metadata without fetching full data.
@@ -401,8 +486,6 @@ class MyCorr:
         Raises:
             TableAPIError: If fetching table info fails.
         """
-        import requests
-
         if not table_id:
             raise ValueError("Table ID is required")
 
@@ -414,7 +497,7 @@ class MyCorr:
         if isinstance(version, int):
             params["version"] = version
 
-        response = requests.get(
+        response = httpx.get(
             f"{self.url}/data/tableinfo",
             headers={"Authorization": f"Bearer {self.token}"},
             params=params,
