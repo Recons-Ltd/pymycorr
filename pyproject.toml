@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "aiohttp>=3.9.0",
     "pyarrow>=14.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]

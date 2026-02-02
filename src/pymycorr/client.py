@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import aiohttp
 import pyarrow as pa
 import pyarrow.ipc as ipc
+from dotenv import load_dotenv
 
 from pymycorr.exceptions import TableAPIError, TableConversionError
 
@@ -19,24 +22,39 @@ if TYPE_CHECKING:
 class MyCorr:
     """Client for fetching table data from API with Arrow format support."""
 
-    def __init__(self, url: str, token: str) -> None:
+    DEFAULT_URL = "https://api.mycorr.recons-ltd.com"
+
+    def __init__(
+        self,
+        url: str | None = None,
+        token: str | None = None,
+        env_file: str | Path | None = None,
+    ) -> None:
         """Initialize the client with authentication token and API URL.
 
+        Configuration is resolved in the following order:
+        1. Explicit parameters (highest priority)
+        2. Environment variables (MYCORR_API_URL, MYCORR_API_TOKEN)
+        3. Default values (URL only)
+
         Args:
-            url: API base URL.
-            token: Authentication token for API access.
+            url: API base URL. Falls back to MYCORR_API_URL env var, then default.
+            token: Authentication token. Falls back to MYCORR_API_TOKEN env var.
+            env_file: Optional path to .env file. If None, auto-discovers .env.
 
         Raises:
-            ValueError: If token or url is empty.
+            ValueError: If token cannot be resolved.
         """
-        if not token:
-            raise ValueError("Authentication token is required")
+        load_dotenv(dotenv_path=env_file)
 
-        if not url:
-            raise ValueError("API URL is required")
+        self.url = (url or os.getenv("MYCORR_API_URL")
+                    or self.DEFAULT_URL).rstrip("/")
+        self.token = token or os.getenv("MYCORR_API_TOKEN")
 
-        self.url = url
-        self.token = token
+        if not self.token:
+            raise ValueError(
+                "token is required (pass explicitly or set MYCORR_API_TOKEN environment variable)"
+            )
 
     async def get_data_stream(
         self,
@@ -79,7 +97,7 @@ class MyCorr:
         async with (
             aiohttp.ClientSession(timeout=timeout) as session,
             session.get(
-                f"{self.url}/stream",
+                f"{self.url}/data/table/stream",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Accept": "application/vnd.apache.arrow.stream",
@@ -129,7 +147,8 @@ class MyCorr:
                 f"Expected 'version' to be int, str, or None, got {type(version).__name__}"
             )
         if engine not in ("pandas", "polars"):
-            raise ValueError(f"Engine must be 'pandas' or 'polars', got '{engine}'")
+            raise ValueError(
+                f"Engine must be 'pandas' or 'polars', got '{engine}'")
 
         async def get_dataframe_async() -> pd.DataFrame | pl.DataFrame:
             """Internal async function to fetch and convert data."""
@@ -138,7 +157,8 @@ class MyCorr:
             try:
                 if engine == "pandas":
                     if len(data_stream) == 0:
-                        print(f"Table is empty with schema: {data_stream.schema}")
+                        print(
+                            f"Table is empty with schema: {data_stream.schema}")
                     return data_stream.to_pandas()
                 else:
                     import polars as pl_module
@@ -181,8 +201,9 @@ class MyCorr:
         Raises:
             TableAPIError: If fetching table info fails.
         """
-        try:
-            data_stream = asyncio.run(self.get_data_stream(table_id, version))
+
+        async def get_info_async() -> dict[str, Any]:
+            data_stream = await self.get_data_stream(table_id, version)
             return {
                 "table_id": table_id,
                 "schema": str(data_stream.schema),
@@ -191,5 +212,22 @@ class MyCorr:
                 "column_names": data_stream.column_names,
                 "column_types": [str(field.type) for field in data_stream.schema],
             }
-        except Exception as e:
-            raise TableAPIError(f"Failed to get table info: {e!s}") from e
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(get_info_async())
+
+        if loop.is_running():
+            try:
+                import nest_asyncio
+
+                nest_asyncio.apply()
+                return loop.run_until_complete(get_info_async())
+            except ImportError as e:
+                raise RuntimeError(
+                    "nest_asyncio is required when calling from within an async context "
+                    "(e.g., Jupyter notebooks). Install with: pip install nest-asyncio"
+                ) from e
+        else:
+            return loop.run_until_complete(get_info_async())
