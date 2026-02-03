@@ -2,6 +2,7 @@
 
 from pymycorr.client import MyCorr
 from pymycorr.exceptions import (
+    StreamingError,
     TableAPIError,
     TableConversionError,
     TableNotFoundError,
@@ -10,6 +11,7 @@ from pymycorr.exceptions import (
 __version__ = "0.1.0"
 __all__ = [
     "MyCorr",
+    "StreamingError",
     "TableAPIError",
     "TableNotFoundError",
     "TableConversionError",
