@@ -38,24 +38,30 @@ def empty_arrow_table() -> pa.Table:
 
 @pytest.fixture
 def multi_batch_arrow_bytes() -> bytes:
-    """Create multiple concatenated IPC streams (simulating server format).
+    """Create a single IPC stream with multiple batches.
 
-    The server sends multiple complete IPC streams, one per batch,
-    each with its own schema and terminated by EOS marker.
+    The server sends one IPC stream containing multiple record batches,
+    with a single EOS marker at the end.
     """
     import pyarrow.ipc as ipc
 
-    streams = []
+    # Create schema once
+    schema = pa.schema([("batch_id", pa.int64()), ("value", pa.int64())])
+
+    # Create IPC stream with multiple batches
+    sink = pa.BufferOutputStream()
+    writer = ipc.new_stream(sink, schema)
+
     for i in range(3):
-        table = pa.table(
+        batch = pa.record_batch(
             {
                 "batch_id": [i] * 10,
                 "value": list(range(i * 10, (i + 1) * 10)),
-            }
+            },
+            schema=schema,
         )
-        sink = pa.BufferOutputStream()
-        writer = ipc.new_stream(sink, table.schema)
-        writer.write_table(table)
-        writer.close()
-        streams.append(sink.getvalue().to_pybytes())
-    return b"".join(streams)
+        writer.write_batch(batch)
+
+    writer.close()
+    result: bytes = sink.getvalue().to_pybytes()
+    return result
