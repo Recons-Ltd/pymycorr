@@ -15,7 +15,6 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 from dotenv import load_dotenv
 
-from pymycorr._ipc_buffer import _IPCStreamBuffer
 from pymycorr._progress import ProgressTracker
 from pymycorr.exceptions import StreamingError, TableConversionError
 
@@ -24,6 +23,43 @@ if TYPE_CHECKING:
     import polars as pl
 
 T = TypeVar("T")
+
+
+class _StreamingBuffer:
+    """Bridges async HTTP chunks to PyArrow's synchronous read() interface."""
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self._chunks: queue.Queue[bytes | None] = queue.Queue()
+        self._eof = False
+
+    def feed(self, chunk: bytes) -> None:
+        """Called by producer with incoming chunks."""
+        self._chunks.put(chunk)
+
+    def close(self) -> None:
+        """Signal end of stream."""
+        self._chunks.put(None)
+
+    def read(self, n: int = -1) -> bytes:
+        """Called by PyArrow - blocks until data available."""
+        while not self._eof and (n == -1 or len(self._buffer) < n):
+            try:
+                chunk = self._chunks.get(timeout=300)
+            except queue.Empty:
+                break
+            if chunk is None:
+                self._eof = True
+                break
+            self._buffer.extend(chunk)
+
+        if n == -1 or n >= len(self._buffer):
+            result = bytes(self._buffer)
+            self._buffer.clear()
+        else:
+            result = bytes(self._buffer[:n])
+            del self._buffer[:n]
+        return result
 
 
 class MyCorr:
@@ -170,9 +206,6 @@ class MyCorr:
         Yields individual RecordBatch objects as they arrive over the network,
         allowing processing of large tables without loading everything into memory.
 
-        Uses true network-level streaming: batches are yielded as soon as each
-        complete IPC stream arrives, rather than waiting for the entire response.
-
         Args:
             table_id: Unique identifier for the table.
             version: Version number (int) or version alias (str, e.g., 'latest', 'stable').
@@ -192,10 +225,7 @@ class MyCorr:
         effective_progress: bool | Literal["auto"] = (
             progress if progress is not None else self._default_progress
         )
-
-        batches_received = 0
         timeout = httpx.Timeout(timeout=300.0, connect=30.0)
-        buffer = _IPCStreamBuffer(max_buffer_size=100 * 1024 * 1024)  # 100MB
 
         try:
             async with (
@@ -219,36 +249,24 @@ class MyCorr:
                         error_msg = f"HTTP {response.status_code}"
                     raise StreamingError(f"Error fetching table: {error_msg}")
 
-                # True streaming: process chunks as they arrive
+                # Collect all chunks (server now sends single IPC stream)
+                chunks: list[bytes] = []
                 with ProgressTracker(effective_progress, desc=f"Fetching {table_id}") as tracker:
                     async for chunk in response.aiter_bytes():
                         tracker.update(len(chunk))
-                        for complete_ipc_stream in buffer.add_chunk(chunk):
-                            try:
-                                reader = ipc.open_stream(complete_ipc_stream)
-                                table = reader.read_all()
-                                for batch in table.to_batches():
-                                    batches_received += 1
-                                    yield batch
-                            except (pa.ArrowInvalid, pa.ArrowIOError) as e:
-                                raise StreamingError(
-                                    f"Failed to parse IPC stream: {e}",
-                                    batches_received=batches_received,
-                                ) from e
+                        chunks.append(chunk)
 
-                    # Check for incomplete stream at end
-                    remaining = buffer.remaining()
-                    if remaining:
-                        raise StreamingError(
-                            f"Stream ended with {len(remaining)} bytes of incomplete data",
-                            batches_received=batches_received,
-                        )
+                # Parse single IPC stream with PyArrow's native reader
+                data = b"".join(chunks)
+                try:
+                    reader = ipc.open_stream(data)
+                    for batch in reader:
+                        yield batch
+                except (pa.ArrowInvalid, pa.ArrowIOError) as e:
+                    raise StreamingError(f"Failed to parse IPC stream: {e}") from e
 
         except httpx.HTTPError as e:
-            raise StreamingError(
-                f"Connection error after {batches_received} batches: {e!s}",
-                batches_received=batches_received,
-            ) from e
+            raise StreamingError(f"Connection error: {e!s}") from e
 
     def _iter_record_batches(
         self,
@@ -302,34 +320,75 @@ class MyCorr:
         version: int | str | None,
         progress: bool | Literal["auto"] | None = None,
     ) -> Iterator[pa.RecordBatch]:
-        """True streaming sync iteration using thread + queue."""
-        batch_queue: queue.Queue[pa.RecordBatch | None | Exception] = queue.Queue(maxsize=4)
+        """True streaming sync iteration using thread + PyArrow native reader.
+
+        Uses _StreamingBuffer to bridge async HTTP chunks to PyArrow's
+        synchronous read() interface, enabling true streaming where batches
+        are yielded as data arrives over the network.
+        """
+        buffer = _StreamingBuffer()
+        error_holder: list[Exception] = []
 
         def producer() -> None:
             async def fetch() -> None:
+                params = self._build_version_params(table_id, version)
+                effective_progress: bool | Literal["auto"] = (
+                    progress if progress is not None else self._default_progress
+                )
+                timeout = httpx.Timeout(timeout=300.0, connect=30.0)
+
                 try:
-                    async for batch in self._stream_record_batches(
-                        table_id, version, progress=progress
+                    async with (
+                        httpx.AsyncClient(timeout=timeout, verify=self._verify_ssl) as client,
+                        client.stream(
+                            "GET",
+                            f"{self.url}/data/table/stream",
+                            headers={
+                                "Authorization": f"Bearer {self.token}",
+                                "Accept": "application/vnd.apache.arrow.stream",
+                            },
+                            params=params,
+                        ) as response,
                     ):
-                        batch_queue.put(batch)
-                    batch_queue.put(None)  # Signal completion
+                        if response.status_code != 200:
+                            await response.aread()
+                            try:
+                                error_msg = response.json().get("message", "Internal server error")
+                            except Exception:
+                                error_msg = f"HTTP {response.status_code}"
+                            raise StreamingError(f"Error fetching table: {error_msg}")
+
+                        with ProgressTracker(
+                            effective_progress, desc=f"Fetching {table_id}"
+                        ) as tracker:
+                            async for chunk in response.aiter_bytes():
+                                tracker.update(len(chunk))
+                                buffer.feed(chunk)
                 except Exception as e:
-                    batch_queue.put(e)
+                    error_holder.append(e)
+                finally:
+                    buffer.close()
 
             asyncio.run(fetch())
 
         thread = threading.Thread(target=producer, daemon=True)
         thread.start()
 
-        while True:
-            item = batch_queue.get()
-            if item is None:
-                break
-            if isinstance(item, Exception):
-                raise item
-            yield item
+        # PyArrow reads from buffer as data arrives
+        try:
+            reader = ipc.open_stream(buffer)
+            yield from reader
+        except (pa.ArrowInvalid, pa.ArrowIOError) as e:
+            thread.join()
+            if error_holder:
+                raise error_holder[0] from e
+            raise StreamingError(f"Failed to parse IPC stream: {e}") from e
 
         thread.join()
+
+        # Re-raise any error from the producer thread
+        if error_holder:
+            raise error_holder[0]
 
     def _stream_to_dataframes(
         self,
