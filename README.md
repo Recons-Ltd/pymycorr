@@ -10,6 +10,7 @@ Python client for fetching table data from the MyCorr API using Apache Arrow for
 
 - Native support for both pandas and polars DataFrames
 - Efficient Arrow IPC streaming for large datasets
+- Built-in progress indicator for downloads
 - Full type hints for IDE support
 
 ## Installation
@@ -20,7 +21,7 @@ Python client for fetching table data from the MyCorr API using Apache Arrow for
 pip install pymycorr
 ```
 
-This includes pandas support by default.
+This includes pandas support and progress indicators by default.
 
 ### With Optional Features
 
@@ -28,33 +29,26 @@ This includes pandas support by default.
 # With polars support
 pip install "pymycorr[polars]"
 
-# With progress bar support
-pip install "pymycorr[progress]"
-
-# For Jupyter notebooks (progress bars + async support)
+# For Jupyter notebooks (async support)
 pip install "pymycorr[jupyter]"
 
-# All features (polars, progress bars, jupyter support)
+# All features (polars + jupyter support)
 pip install "pymycorr[all]"
 ```
 
 ### Available Extras
 
-| Extra      | Includes                       | Use Case                                         |
-| ---------- | ------------------------------ | ------------------------------------------------ |
-| `polars`   | polars                         | Use polars DataFrames                            |
-| `progress` | tqdm                           | Progress bars in terminal                        |
-| `jupyter`  | tqdm, ipywidgets, nest-asyncio | Full Jupyter notebook support with progress bars |
-| `all`      | All of the above               | Install everything                               |
+| Extra     | Includes       | Use Case                            |
+| --------- | -------------- | ----------------------------------- |
+| `polars`  | polars         | Use polars DataFrames               |
+| `jupyter` | nest-asyncio   | Async support in Jupyter notebooks  |
+| `all`     | All of above   | Install everything                  |
 
 ### Combining Extras
 
 You can combine multiple extras:
 
 ```bash
-# polars + progress bars
-pip install "pymycorr[polars,progress]"
-
 # polars + jupyter support
 pip install "pymycorr[polars,jupyter]"
 ```
@@ -120,25 +114,45 @@ print(info["schema"])
 print(info["num_rows"])
 ```
 
+### Progress Display
+
+Progress is shown automatically in interactive environments (terminals and notebooks). You can control this behavior:
+
+```python
+# Always show progress
+client = MyCorr(token="...", progress=True)
+
+# Never show progress
+client = MyCorr(token="...", progress=False)
+
+# Auto-detect (default): show in terminals/notebooks, hide in scripts/CI
+client = MyCorr(token="...", progress="auto")
+
+# Override per-request
+df = client.get_table("table-id", progress=False)
+```
+
 ## API Reference
 
 ### MyCorr
 
-#### `__init__(url: str, token: str = None, env_file: str = None)`
+#### `__init__(url: str, token: str = None, env_file: str = None, progress: bool | "auto" = "auto")`
 
 Initialize the client.
 
 - `url`: API base URL
 - `token`: Authentication token (Bearer token from MyCorr UI). If not provided, loads from `MYCORR_API_TOKEN` environment variable or `.env` file.
 - `env_file`: Path to custom `.env` file (optional)
+- `progress`: Show download progress. `True` always shows, `False` never shows, `"auto"` (default) shows in interactive environments.
 
-#### `get_table(table_id, version=None, engine="pandas")`
+#### `get_table(table_id, version=None, engine="pandas", progress=None)`
 
 Fetch table data as a DataFrame.
 
 - `table_id`: Unique identifier for the table
 - `version`: Version number (int) or alias (str like `"latest"`, `"stable"`)
 - `engine`: `"pandas"` or `"polars"`
+- `progress`: Override client's progress setting for this request
 - Returns: pandas or polars DataFrame
 
 #### `get_table_info(table_id, version=None)`
