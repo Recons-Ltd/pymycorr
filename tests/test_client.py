@@ -9,7 +9,7 @@ import pytest
 import respx
 
 from pymycorr import MyCorr, StreamingError, TableAPIError
-from pymycorr.client import _IPCStreamBuffer
+from pymycorr._ipc_buffer import _IPCStreamBuffer
 
 
 class TestMyCorrrInit:

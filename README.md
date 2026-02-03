@@ -14,20 +14,49 @@ Python client for fetching table data from the MyCorr API using Apache Arrow for
 
 ## Installation
 
+### Basic Installation
+
 ```bash
 pip install pymycorr
+```
 
-# With pandas support
-pip install pymycorr[pandas]
+This includes pandas support by default.
 
+### With Optional Features
+
+```bash
 # With polars support
-pip install pymycorr[polars]
+pip install "pymycorr[polars]"
 
-# With both pandas and polars
-pip install pymycorr[all]
+# With progress bar support
+pip install "pymycorr[progress]"
 
-# For Jupyter notebook users (includes nest-asyncio)
-pip install pymycorr[all,jupyter]
+# For Jupyter notebooks (progress bars + async support)
+pip install "pymycorr[jupyter]"
+
+# All features (polars, progress bars, jupyter support)
+pip install "pymycorr[all]"
+```
+
+### Available Extras
+
+| Extra      | Includes                       | Use Case                                         |
+| ---------- | ------------------------------ | ------------------------------------------------ |
+| `polars`   | polars                         | Use polars DataFrames                            |
+| `progress` | tqdm                           | Progress bars in terminal                        |
+| `jupyter`  | tqdm, ipywidgets, nest-asyncio | Full Jupyter notebook support with progress bars |
+| `all`      | All of the above               | Install everything                               |
+
+### Combining Extras
+
+You can combine multiple extras:
+
+```bash
+# polars + progress bars
+pip install "pymycorr[polars,progress]"
+
+# polars + jupyter support
+pip install "pymycorr[polars,jupyter]"
 ```
 
 ## Configuration

@@ -15,6 +15,8 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 from dotenv import load_dotenv
 
+from pymycorr._ipc_buffer import _IPCStreamBuffer
+from pymycorr._progress import ProgressTracker
 from pymycorr.exceptions import StreamingError, TableConversionError
 
 if TYPE_CHECKING:
@@ -24,97 +26,18 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-class _IPCStreamBuffer:
-    """Accumulates HTTP chunks and yields complete IPC streams.
-
-    The server sends multiple complete Arrow IPC streams (one per batch),
-    each terminated by an EOS marker. This class buffers incoming HTTP chunks
-    and yields complete IPC streams as they are detected.
-
-    Note: The EOS marker bytes could appear within Arrow data, so we validate
-    each candidate stream can actually be parsed before yielding it.
-    """
-
-    EOS_MARKER = b"\xff\xff\xff\xff\x00\x00\x00\x00"
-    EOS_LEN = 8
-
-    def __init__(self, max_buffer_size: int | None = None) -> None:
-        """Initialize the buffer.
-
-        Args:
-            max_buffer_size: Maximum buffer size in bytes before raising error.
-                None for unlimited.
-        """
-        self._buffer = bytearray()
-        self._max_buffer_size = max_buffer_size
-        self.total_bytes = 0
-        self.streams_parsed = 0
-
-    def _is_valid_ipc_stream(self, data: bytes) -> bool:
-        """Check if data is a valid, complete IPC stream."""
-        try:
-            reader = ipc.open_stream(data)
-            reader.read_all()  # Validates the entire stream
-            return True
-        except (pa.ArrowInvalid, pa.ArrowIOError):
-            return False
-
-    def add_chunk(self, chunk: bytes) -> Iterator[bytes]:
-        """Add HTTP chunk and yield any complete IPC streams found.
-
-        Args:
-            chunk: Raw bytes from HTTP response.
-
-        Yields:
-            Complete IPC stream bytes (including EOS marker).
-
-        Raises:
-            StreamingError: If buffer exceeds max_buffer_size.
-        """
-        self._buffer.extend(chunk)
-        self.total_bytes += len(chunk)
-
-        if self._max_buffer_size and len(self._buffer) > self._max_buffer_size:
-            raise StreamingError(
-                f"Buffer exceeded {self._max_buffer_size} bytes - possible malformed stream"
-            )
-
-        # Search for EOS markers, but validate each candidate is a real IPC stream
-        search_start = 0
-        while True:
-            eos_pos = self._buffer.find(self.EOS_MARKER, search_start)
-            if eos_pos == -1:
-                break
-
-            stream_end = eos_pos + self.EOS_LEN
-            candidate_stream = bytes(self._buffer[:stream_end])
-
-            if self._is_valid_ipc_stream(candidate_stream):
-                # Valid stream found - yield it and remove from buffer
-                del self._buffer[:stream_end]
-                self.streams_parsed += 1
-                yield candidate_stream
-                search_start = 0  # Reset search for next stream
-            else:
-                # False positive - EOS marker bytes appeared in data
-                # Continue searching after this position
-                search_start = eos_pos + 1
-
-    def remaining(self) -> bytes:
-        """Return any leftover buffer data after stream ends."""
-        return bytes(self._buffer)
-
-
 class MyCorr:
     """Client for fetching table data from API with Arrow format support."""
 
     DEFAULT_URL = "https://api.mycorr.recons-ltd.com"
+    _default_progress: bool | Literal["auto"]
 
     def __init__(
         self,
         url: str | None = None,
         token: str | None = None,
         env_file: str | Path | None = None,
+        progress: bool | Literal["auto"] = "auto",
     ) -> None:
         """Initialize the client with authentication token and API URL.
 
@@ -127,6 +50,8 @@ class MyCorr:
             url: API base URL. Falls back to MYCORR_API_URL env var, then default.
             token: Authentication token. Falls back to MYCORR_API_TOKEN env var.
             env_file: Optional path to .env file. If None, auto-discovers .env.
+            progress: Show download progress. True always shows, False never shows,
+                'auto' (default) shows in notebooks/terminals but not in non-interactive.
 
         Raises:
             ValueError: If token cannot be resolved.
@@ -136,6 +61,7 @@ class MyCorr:
         self.url = (url or os.getenv("MYCORR_API_URL") or self.DEFAULT_URL).rstrip("/")
         self.token = token or os.getenv("MYCORR_API_TOKEN")
         self._verify_ssl = "localhost" not in self.url
+        self._default_progress = progress
 
         if not self.token:
             raise ValueError(
@@ -208,12 +134,14 @@ class MyCorr:
         self,
         table_id: str,
         version: int | str | None = None,
+        progress: bool | Literal["auto"] | None = None,
     ) -> pa.Table:
         """Fetch Arrow stream from API asynchronously.
 
         Args:
             table_id: Unique identifier for the table.
             version: Version number (int) or version alias (str, e.g., 'latest', 'stable').
+            progress: Show download progress. None uses client default.
 
         Returns:
             PyArrow Table containing the data.
@@ -223,7 +151,7 @@ class MyCorr:
             TableAPIError: For API or parsing errors.
         """
         batches = []
-        async for batch in self._stream_record_batches(table_id, version):
+        async for batch in self._stream_record_batches(table_id, version, progress=progress):
             batches.append(batch)
 
         if not batches:
@@ -235,6 +163,7 @@ class MyCorr:
         self,
         table_id: str,
         version: int | str | None = None,
+        progress: bool | Literal["auto"] | None = None,
     ) -> AsyncIterator[pa.RecordBatch]:
         """Stream Arrow record batches from API asynchronously.
 
@@ -247,6 +176,7 @@ class MyCorr:
         Args:
             table_id: Unique identifier for the table.
             version: Version number (int) or version alias (str, e.g., 'latest', 'stable').
+            progress: Show download progress. None uses client default.
 
         Yields:
             PyArrow RecordBatch objects.
@@ -259,6 +189,9 @@ class MyCorr:
             raise ValueError("Table ID is required")
 
         params = self._build_version_params(table_id, version)
+        effective_progress: bool | Literal["auto"] = (
+            progress if progress is not None else self._default_progress
+        )
 
         batches_received = 0
         timeout = httpx.Timeout(timeout=300.0, connect=30.0)
@@ -287,27 +220,29 @@ class MyCorr:
                     raise StreamingError(f"Error fetching table: {error_msg}")
 
                 # True streaming: process chunks as they arrive
-                async for chunk in response.aiter_bytes():
-                    for complete_ipc_stream in buffer.add_chunk(chunk):
-                        try:
-                            reader = ipc.open_stream(complete_ipc_stream)
-                            table = reader.read_all()
-                            for batch in table.to_batches():
-                                batches_received += 1
-                                yield batch
-                        except (pa.ArrowInvalid, pa.ArrowIOError) as e:
-                            raise StreamingError(
-                                f"Failed to parse IPC stream: {e}",
-                                batches_received=batches_received,
-                            ) from e
+                with ProgressTracker(effective_progress, desc=f"Fetching {table_id}") as tracker:
+                    async for chunk in response.aiter_bytes():
+                        tracker.update(len(chunk))
+                        for complete_ipc_stream in buffer.add_chunk(chunk):
+                            try:
+                                reader = ipc.open_stream(complete_ipc_stream)
+                                table = reader.read_all()
+                                for batch in table.to_batches():
+                                    batches_received += 1
+                                    yield batch
+                            except (pa.ArrowInvalid, pa.ArrowIOError) as e:
+                                raise StreamingError(
+                                    f"Failed to parse IPC stream: {e}",
+                                    batches_received=batches_received,
+                                ) from e
 
-                # Check for incomplete stream at end
-                remaining = buffer.remaining()
-                if remaining:
-                    raise StreamingError(
-                        f"Stream ended with {len(remaining)} bytes of incomplete data",
-                        batches_received=batches_received,
-                    )
+                    # Check for incomplete stream at end
+                    remaining = buffer.remaining()
+                    if remaining:
+                        raise StreamingError(
+                            f"Stream ended with {len(remaining)} bytes of incomplete data",
+                            batches_received=batches_received,
+                        )
 
         except httpx.HTTPError as e:
             raise StreamingError(
@@ -319,6 +254,7 @@ class MyCorr:
         self,
         table_id: str,
         version: int | str | None = None,
+        progress: bool | Literal["auto"] | None = None,
     ) -> Iterator[pa.RecordBatch]:
         """Synchronous iterator over record batches.
 
@@ -329,6 +265,7 @@ class MyCorr:
         Args:
             table_id: Unique identifier for the table.
             version: Version number (int) or version alias (str, e.g., 'latest', 'stable').
+            progress: Show download progress. None uses client default.
 
         Yields:
             PyArrow RecordBatch objects.
@@ -347,17 +284,23 @@ class MyCorr:
         if has_running_loop:
             # In Jupyter or async context - collect all batches via _run_sync
             async def collect() -> list[pa.RecordBatch]:
-                return [batch async for batch in self._stream_record_batches(table_id, version)]
+                return [
+                    batch
+                    async for batch in self._stream_record_batches(
+                        table_id, version, progress=progress
+                    )
+                ]
 
             yield from self._run_sync(collect())
         else:
             # No running loop - use thread + queue for true streaming
-            yield from self._sync_stream_batches(table_id, version)
+            yield from self._sync_stream_batches(table_id, version, progress=progress)
 
     def _sync_stream_batches(
         self,
         table_id: str,
         version: int | str | None,
+        progress: bool | Literal["auto"] | None = None,
     ) -> Iterator[pa.RecordBatch]:
         """True streaming sync iteration using thread + queue."""
         batch_queue: queue.Queue[pa.RecordBatch | None | Exception] = queue.Queue(maxsize=4)
@@ -365,7 +308,9 @@ class MyCorr:
         def producer() -> None:
             async def fetch() -> None:
                 try:
-                    async for batch in self._stream_record_batches(table_id, version):
+                    async for batch in self._stream_record_batches(
+                        table_id, version, progress=progress
+                    ):
                         batch_queue.put(batch)
                     batch_queue.put(None)  # Signal completion
                 except Exception as e:
@@ -391,6 +336,7 @@ class MyCorr:
         table_id: str,
         version: int | str | None = None,
         engine: Literal["pandas", "polars"] = "pandas",
+        progress: bool | Literal["auto"] | None = None,
     ) -> Iterator[Any]:
         """Stream data as individual DataFrames per batch.
 
@@ -401,6 +347,7 @@ class MyCorr:
             table_id: Unique identifier for the table.
             version: Version number (int) or version alias (str, e.g., 'latest', 'stable').
             engine: Data processing engine ('pandas' or 'polars').
+            progress: Show download progress. None uses client default.
 
         Yields:
             DataFrame in the specified format (pandas or polars).
@@ -413,7 +360,7 @@ class MyCorr:
         if engine not in ("pandas", "polars"):
             raise ValueError(f"Engine must be 'pandas' or 'polars', got '{engine}'")
 
-        for batch in self._iter_record_batches(table_id, version):
+        for batch in self._iter_record_batches(table_id, version, progress=progress):
             try:
                 if engine == "pandas":
                     # Convert batch to table first to ensure DataFrame output
@@ -433,6 +380,7 @@ class MyCorr:
         table_id: str,
         version: int | str | None = None,
         engine: Literal["pandas", "polars"] = "pandas",
+        progress: bool | Literal["auto"] | None = None,
     ) -> pd.DataFrame | pl.DataFrame:
         """Fetch table data synchronously and convert to DataFrame.
 
@@ -440,6 +388,7 @@ class MyCorr:
             table_id: Unique identifier for the table.
             version: Version number (int) or version alias (str, e.g., 'latest', 'stable').
             engine: Data processing engine ('pandas' or 'polars').
+            progress: Show download progress. None uses client default.
 
         Returns:
             DataFrame in the specified format (pandas or polars).
@@ -455,7 +404,7 @@ class MyCorr:
 
         async def get_dataframe_async() -> pd.DataFrame | pl.DataFrame:
             """Internal async function to fetch and convert data."""
-            data_stream = await self._get_data_stream(table_id, version)
+            data_stream = await self._get_data_stream(table_id, version, progress=progress)
 
             try:
                 if engine == "pandas":
