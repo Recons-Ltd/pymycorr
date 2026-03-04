@@ -27,9 +27,9 @@ from pymycorr.exceptions import (
     AuthenticationError,
     ForbiddenError,
     JsonAPIError,
+    NotFoundError,
     StreamingError,
     TableConversionError,
-    NotFoundError,
 )
 
 if TYPE_CHECKING:
@@ -827,21 +827,16 @@ class MyCorr:
 
                 return cast(
                     "pd.DataFrame",
-                    pd_module.DataFrame(
-                        {name: all_columns[name] for name in column_names_ordered}
-                    ),
+                    pd_module.DataFrame({name: all_columns[name] for name in column_names_ordered}),
                 )
             else:
                 import polars as pl_module
 
                 return cast(
                     "pl.DataFrame",
-                    pl_module.DataFrame(
-                        {name: all_columns[name] for name in column_names_ordered}
-                    ),
+                    pl_module.DataFrame({name: all_columns[name] for name in column_names_ordered}),
                 )
         except Exception as e:
             raise TableConversionError(
                 f"Failed to convert table data to {engine} format: {e!s}"
             ) from e
-
