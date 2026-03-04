@@ -15,8 +15,22 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 from dotenv import load_dotenv
 
+from pymycorr._json_api import (
+    CheckpointInfo,
+    ModelMetadata,
+    TableDataPage,
+    TableInfo,
+    TableMetadata,
+)
 from pymycorr._progress import ProgressTracker
-from pymycorr.exceptions import StreamingError, TableConversionError
+from pymycorr.exceptions import (
+    AuthenticationError,
+    ForbiddenError,
+    JsonAPIError,
+    StreamingError,
+    TableConversionError,
+    NotFoundError,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -520,3 +534,314 @@ class MyCorr:
             raise StreamingError(f"Error fetching table info: {error_msg}")
 
         return cast(dict[str, Any], response.json())
+
+    # ── JSON Client API (/data/json/v1) ──────────────────────────────
+
+    @property
+    def _json_client(self) -> httpx.Client:
+        """Lazy-initialized httpx.Client for JSON API requests."""
+        if not hasattr(self, "_json_client_instance"):
+            self._json_client_instance = httpx.Client(
+                base_url=f"{self.url}/data/json/v1",
+                headers={"Authorization": f"Bearer {self.token}"},
+                verify=self._verify_ssl,
+                timeout=httpx.Timeout(timeout=60.0, connect=10.0),
+            )
+        return self._json_client_instance
+
+    def _json_api_request(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Make a GET request to the JSON client API.
+
+        Args:
+            path: Path relative to /data/json/v1 (e.g., "/models").
+            params: Optional query parameters.
+
+        Returns:
+            The parsed JSON response body (envelope with "data" and optional "meta").
+
+        Raises:
+            AuthenticationError: On 401 responses.
+            ForbiddenError: On 403 responses.
+            NotFoundError: On 404 responses.
+            JsonAPIError: On other error responses.
+        """
+        response = self._json_client.get(path, params=params)
+
+        if response.status_code != 200:
+            try:
+                error_body = response.json()
+                error_info = error_body.get("error", {})
+                error_msg = error_info.get("message", f"HTTP {response.status_code}")
+            except Exception:
+                error_msg = f"HTTP {response.status_code}"
+
+            if response.status_code == 401:
+                raise AuthenticationError(error_msg)
+            if response.status_code == 403:
+                raise ForbiddenError(error_msg)
+            if response.status_code == 404:
+                raise NotFoundError(error_msg)
+            raise JsonAPIError(error_msg, status_code=response.status_code)
+
+        return cast(dict[str, Any], response.json())
+
+    def list_models(self) -> list[ModelMetadata]:
+        """List all models the authenticated user has access to.
+
+        Returns:
+            List of model metadata dictionaries.
+
+        Raises:
+            AuthenticationError: If the token is invalid or expired.
+            JsonAPIError: For other API errors.
+        """
+
+        response = self._json_api_request("/models")
+        return cast(list[ModelMetadata], response["data"])
+
+    def get_model(self, model_id: str) -> ModelMetadata:
+        """Get metadata for a single model.
+
+        Args:
+            model_id: The model identifier.
+
+        Returns:
+            Model metadata dictionary.
+
+        Raises:
+            ValueError: If model_id is empty.
+            NotFoundError: If the model is not found.
+            ForbiddenError: If the user lacks permission.
+            JsonAPIError: For other API errors.
+        """
+        if not model_id:
+            raise ValueError("model_id is required")
+        response = self._json_api_request(f"/models/{model_id}")
+        return cast(ModelMetadata, response["data"])
+
+    def list_tables(self, model_id: str) -> list[TableInfo]:
+        """List all tables in a model.
+
+        Args:
+            model_id: The model identifier.
+
+        Returns:
+            List of table info dictionaries.
+
+        Raises:
+            ValueError: If model_id is empty.
+            ForbiddenError: If the user lacks permission.
+            JsonAPIError: For other API errors.
+        """
+        if not model_id:
+            raise ValueError("model_id is required")
+        response = self._json_api_request(f"/models/{model_id}/tables")
+        return cast(list[TableInfo], response["data"])
+
+    def get_table_schema(self, table_id: str) -> TableMetadata:
+        """Get metadata and column schema for a table.
+
+        Args:
+            table_id: The table identifier.
+
+        Returns:
+            Table metadata with version, row/column counts, and column schema.
+
+        Raises:
+            ValueError: If table_id is empty.
+            NotFoundError: If table not found.
+            ForbiddenError: If the user lacks permission.
+            JsonAPIError: For other API errors.
+        """
+        if not table_id:
+            raise ValueError("table_id is required")
+        response = self._json_api_request(f"/tables/{table_id}")
+        return cast(TableMetadata, response["data"])
+
+    def list_checkpoints(self, table_id: str) -> list[CheckpointInfo]:
+        """List all checkpoints for a table, sorted by most recent first.
+
+        Args:
+            table_id: The table identifier.
+
+        Returns:
+            List of checkpoint metadata dictionaries.
+
+        Raises:
+            ValueError: If table_id is empty.
+            NotFoundError: If table not found.
+            ForbiddenError: If the user lacks permission.
+            JsonAPIError: For other API errors.
+        """
+        if not table_id:
+            raise ValueError("table_id is required")
+        response = self._json_api_request(f"/tables/{table_id}/checkpoints")
+        return cast(list[CheckpointInfo], response["data"])
+
+    def get_table_data(
+        self,
+        table_id: str,
+        *,
+        version: int | None = None,
+        table_checkpoint: str | None = None,
+        limit: int | None = None,
+        page_token: str | None = None,
+    ) -> TableDataPage:
+        """Fetch a single page of table data in column-oriented JSON format.
+
+        Args:
+            table_id: The table identifier.
+            version: Specific table version. Mutually exclusive with table_checkpoint.
+            table_checkpoint: Checkpoint alias. Mutually exclusive with version.
+            limit: Maximum rows per page (server may cap this).
+            page_token: Pagination cursor from a previous response's meta.next_page_token.
+
+        Returns:
+            Dictionary with "data" (TableDataPayload) and "meta" (ResponseMeta).
+
+        Raises:
+            ValueError: If both version and table_checkpoint are provided, or table_id empty.
+            NotFoundError: If table not found.
+            ForbiddenError: If the user lacks permission.
+            JsonAPIError: For other API errors.
+        """
+        if not table_id:
+            raise ValueError("table_id is required")
+        if version is not None and table_checkpoint is not None:
+            raise ValueError("Cannot specify both version and table_checkpoint")
+
+        params: dict[str, Any] = {}
+        if version is not None:
+            params["version"] = version
+        if table_checkpoint is not None:
+            params["table_checkpoint"] = table_checkpoint
+        if limit is not None:
+            params["limit"] = limit
+        if page_token is not None:
+            params["page_token"] = page_token
+
+        response = self._json_api_request(
+            f"/tables/{table_id}/data",
+            params=params,
+        )
+        return cast(TableDataPage, response)
+
+    def iter_table_pages(
+        self,
+        table_id: str,
+        *,
+        version: int | None = None,
+        table_checkpoint: str | None = None,
+        limit: int | None = None,
+    ) -> Iterator[TableDataPage]:
+        """Iterate over all pages of table data, auto-following pagination.
+
+        Args:
+            table_id: The table identifier.
+            version: Specific table version. Mutually exclusive with table_checkpoint.
+            table_checkpoint: Checkpoint alias. Mutually exclusive with version.
+            limit: Maximum rows per page.
+
+        Yields:
+            TableDataPage dictionaries, one per page.
+
+        Raises:
+            ValueError: If both version and table_checkpoint provided, or table_id empty.
+            JsonAPIError: For API errors on any page.
+        """
+        if not table_id:
+            raise ValueError("table_id is required")
+        if version is not None and table_checkpoint is not None:
+            raise ValueError("Cannot specify both version and table_checkpoint")
+
+        next_page_token: str | None = None
+        while True:
+            page = self.get_table_data(
+                table_id,
+                version=version,
+                table_checkpoint=table_checkpoint,
+                limit=limit,
+                page_token=next_page_token,
+            )
+            yield page
+            next_page_token = page.get("meta", {}).get("next_page_token")
+            if next_page_token is None:
+                break
+
+    def get_table_dataframe(
+        self,
+        table_id: str,
+        *,
+        version: int | None = None,
+        table_checkpoint: str | None = None,
+        limit: int | None = None,
+        engine: Literal["pandas", "polars"] = "pandas",
+    ) -> pd.DataFrame | pl.DataFrame:
+        """Fetch all pages of table data and return as a single DataFrame.
+
+        Auto-paginates through all pages, collects column data, and constructs
+        a DataFrame. For large tables, consider iter_table_pages() instead.
+
+        Args:
+            table_id: The table identifier.
+            version: Specific table version. Mutually exclusive with table_checkpoint.
+            table_checkpoint: Checkpoint alias. Mutually exclusive with version.
+            limit: Maximum rows per page (controls page size, all pages still fetched).
+            engine: DataFrame engine ('pandas' or 'polars').
+
+        Returns:
+            DataFrame containing all table data.
+
+        Raises:
+            ValueError: If engine invalid, both version/checkpoint specified, or table_id empty.
+            TableConversionError: If DataFrame conversion fails.
+            JsonAPIError: For API errors.
+        """
+        if engine not in ("pandas", "polars"):
+            raise ValueError(f"Engine must be 'pandas' or 'polars', got '{engine}'")
+
+        all_columns: dict[str, list[Any]] = {}
+        column_names_ordered: list[str] = []
+
+        for page in self.iter_table_pages(
+            table_id,
+            version=version,
+            table_checkpoint=table_checkpoint,
+            limit=limit,
+        ):
+            for col in page["data"]["columns"]:
+                col_name = col["name"]
+                if col_name not in all_columns:
+                    all_columns[col_name] = []
+                    column_names_ordered.append(col_name)
+                all_columns[col_name].extend(col["data"])
+
+        try:
+            if engine == "pandas":
+                import pandas as pd_module
+
+                return cast(
+                    "pd.DataFrame",
+                    pd_module.DataFrame(
+                        {name: all_columns[name] for name in column_names_ordered}
+                    ),
+                )
+            else:
+                import polars as pl_module
+
+                return cast(
+                    "pl.DataFrame",
+                    pl_module.DataFrame(
+                        {name: all_columns[name] for name in column_names_ordered}
+                    ),
+                )
+        except Exception as e:
+            raise TableConversionError(
+                f"Failed to convert table data to {engine} format: {e!s}"
+            ) from e
+

@@ -1,5 +1,7 @@
 """Pytest fixtures for pymycorr tests."""
 
+from typing import Any
+
 import pyarrow as pa
 import pytest
 
@@ -65,3 +67,56 @@ def multi_batch_arrow_bytes() -> bytes:
     writer.close()
     result: bytes = sink.getvalue().to_pybytes()
     return result
+
+
+@pytest.fixture
+def sample_model_metadata() -> dict[str, Any]:
+    """Sample model metadata matching the JSON API response."""
+    return {
+        "model_id": "mdl-test-1234",
+        "model_name": "Test Model",
+        "description": "A test model",
+        "last_modified_at": 1709251200,
+        "created_at": 1706572800,
+    }
+
+
+@pytest.fixture
+def sample_table_info() -> dict[str, Any]:
+    """Sample table info matching the JSON API response."""
+    return {
+        "name": "Customers",
+        "table_id": "tbl-test-5678",
+        "model_id": "mdl-test-1234",
+        "latest_version": 12,
+    }
+
+
+@pytest.fixture
+def sample_table_data_page() -> dict[str, Any]:
+    """Sample paginated table data response."""
+    return {
+        "data": {
+            "table_id": "tbl-test-5678",
+            "name": "Customers",
+            "created_at": 1706572800,
+            "columns": [
+                {
+                    "id": "col-1",
+                    "name": "Email",
+                    "data_type": "Utf8",
+                    "data": ["alice@test.com", "bob@test.com"],
+                },
+                {
+                    "id": "col-2",
+                    "name": "Revenue",
+                    "data_type": "Float64",
+                    "data": [1500.0, 2300.5],
+                },
+            ],
+        },
+        "meta": {
+            "total_rows": 2,
+            "total_columns": 2,
+        },
+    }
