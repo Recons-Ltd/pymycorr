@@ -87,9 +87,7 @@ class TestListModels:
     """Tests for list_models."""
 
     @respx.mock
-    def test_success(
-        self, client: MyCorr, sample_model_metadata: dict[str, Any]
-    ) -> None:
+    def test_success(self, client: MyCorr, sample_model_metadata: dict[str, Any]) -> None:
         respx.get(f"{BASE_URL}/models").mock(
             return_value=httpx.Response(200, json={"data": [sample_model_metadata]})
         )
@@ -102,9 +100,7 @@ class TestListModels:
 
     @respx.mock
     def test_empty_list(self, client: MyCorr) -> None:
-        respx.get(f"{BASE_URL}/models").mock(
-            return_value=httpx.Response(200, json={"data": []})
-        )
+        respx.get(f"{BASE_URL}/models").mock(return_value=httpx.Response(200, json={"data": []}))
 
         result = client.list_models()
         assert result == []
@@ -114,9 +110,7 @@ class TestGetModel:
     """Tests for get_model."""
 
     @respx.mock
-    def test_success(
-        self, client: MyCorr, sample_model_metadata: dict[str, Any]
-    ) -> None:
+    def test_success(self, client: MyCorr, sample_model_metadata: dict[str, Any]) -> None:
         respx.get(url__startswith=f"{BASE_URL}/models/mdl-test-1234").mock(
             return_value=httpx.Response(200, json={"data": sample_model_metadata})
         )
@@ -135,9 +129,7 @@ class TestListTables:
     """Tests for list_tables."""
 
     @respx.mock
-    def test_success(
-        self, client: MyCorr, sample_table_info: dict[str, Any]
-    ) -> None:
+    def test_success(self, client: MyCorr, sample_table_info: dict[str, Any]) -> None:
         respx.get(url__startswith=f"{BASE_URL}/models/mdl-1/tables").mock(
             return_value=httpx.Response(200, json={"data": [sample_table_info]})
         )
@@ -245,9 +237,7 @@ class TestGetTableData:
     """Tests for get_table_data."""
 
     @respx.mock
-    def test_success(
-        self, client: MyCorr, sample_table_data_page: dict[str, Any]
-    ) -> None:
+    def test_success(self, client: MyCorr, sample_table_data_page: dict[str, Any]) -> None:
         respx.get(url__startswith=f"{BASE_URL}/tables/tbl-1/data").mock(
             return_value=httpx.Response(200, json=sample_table_data_page)
         )
@@ -306,9 +296,7 @@ class TestIterTablePages:
     """Tests for iter_table_pages."""
 
     @respx.mock
-    def test_single_page(
-        self, client: MyCorr, sample_table_data_page: dict[str, Any]
-    ) -> None:
+    def test_single_page(self, client: MyCorr, sample_table_data_page: dict[str, Any]) -> None:
         respx.get(url__startswith=f"{BASE_URL}/tables/tbl-1/data").mock(
             return_value=httpx.Response(200, json=sample_table_data_page)
         )
@@ -364,9 +352,7 @@ class TestGetTableDataframe:
     """Tests for get_table_dataframe."""
 
     @respx.mock
-    def test_pandas_dataframe(
-        self, client: MyCorr, sample_table_data_page: dict[str, Any]
-    ) -> None:
+    def test_pandas_dataframe(self, client: MyCorr, sample_table_data_page: dict[str, Any]) -> None:
         respx.get(url__startswith=f"{BASE_URL}/tables/tbl-1/data").mock(
             return_value=httpx.Response(200, json=sample_table_data_page)
         )
@@ -378,9 +364,7 @@ class TestGetTableDataframe:
         assert df["Email"].tolist() == ["alice@test.com", "bob@test.com"]
 
     @respx.mock
-    def test_polars_dataframe(
-        self, client: MyCorr, sample_table_data_page: dict[str, Any]
-    ) -> None:
+    def test_polars_dataframe(self, client: MyCorr, sample_table_data_page: dict[str, Any]) -> None:
         pytest.importorskip("polars")
         respx.get(url__startswith=f"{BASE_URL}/tables/tbl-1/data").mock(
             return_value=httpx.Response(200, json=sample_table_data_page)
