@@ -825,17 +825,11 @@ class MyCorr:
             if engine == "pandas":
                 import pandas as pd_module
 
-                return cast(
-                    "pd.DataFrame",
-                    pd_module.DataFrame({name: all_columns[name] for name in column_names_ordered}),
-                )
+                return pd_module.DataFrame({name: all_columns[name] for name in column_names_ordered})
             else:
                 import polars as pl_module
 
-                return cast(
-                    "pl.DataFrame",
-                    pl_module.DataFrame({name: all_columns[name] for name in column_names_ordered}),
-                )
+                return pl_module.DataFrame({name: all_columns[name] for name in column_names_ordered})
         except Exception as e:
             raise TableConversionError(
                 f"Failed to convert table data to {engine} format: {e!s}"
