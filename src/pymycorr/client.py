@@ -16,7 +16,7 @@ import pyarrow.ipc as ipc
 from dotenv import load_dotenv
 
 from pymycorr._progress import ProgressTracker
-from pymycorr.exceptions import StreamingError, TableConversionError
+from pymycorr.exceptions import QuotaExceededError, StreamingError, TableConversionError
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -243,11 +243,13 @@ class MyCorr:
                 if response.status_code != 200:
                     await response.aread()
                     try:
-                        error = response.json()
-                        error_msg = error.get("message", "Internal server error")
+                        error_body = response.json()
                     except Exception:
-                        error_msg = f"HTTP {response.status_code}"
-                    raise StreamingError(f"Error fetching table: {error_msg}")
+                        error_body = {}
+                    if response.status_code == 429:
+                        raise QuotaExceededError(error_body)
+                    msg = error_body.get("message", f"HTTP {response.status_code}")
+                    raise StreamingError(f"Error fetching table: {msg}")
 
                 # Collect all chunks (server now sends single IPC stream)
                 chunks: list[bytes] = []
@@ -353,10 +355,13 @@ class MyCorr:
                         if response.status_code != 200:
                             await response.aread()
                             try:
-                                error_msg = response.json().get("message", "Internal server error")
+                                error_body = response.json()
                             except Exception:
-                                error_msg = f"HTTP {response.status_code}"
-                            raise StreamingError(f"Error fetching table: {error_msg}")
+                                error_body = {}
+                            if response.status_code == 429:
+                                raise QuotaExceededError(error_body)
+                            msg = error_body.get("message", f"HTTP {response.status_code}")
+                            raise StreamingError(f"Error fetching table: {msg}")
 
                         with ProgressTracker(
                             effective_progress, desc=f"Fetching {table_id}"
