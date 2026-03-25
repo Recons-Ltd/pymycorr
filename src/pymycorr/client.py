@@ -236,6 +236,7 @@ class MyCorr:
                     headers={
                         "Authorization": f"Bearer {self.token}",
                         "Accept": "application/vnd.apache.arrow.stream",
+                        "X-Table-ID": table_id,
                     },
                     params=params,
                 ) as response,
@@ -348,6 +349,7 @@ class MyCorr:
                             headers={
                                 "Authorization": f"Bearer {self.token}",
                                 "Accept": "application/vnd.apache.arrow.stream",
+                                "X-Table-ID": table_id,
                             },
                             params=params,
                         ) as response,
@@ -512,7 +514,10 @@ class MyCorr:
 
         response = httpx.get(
             f"{self.url}/data/tableinfo",
-            headers={"Authorization": f"Bearer {self.token}"},
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "X-Table-ID": table_id,
+            },
             params=params,
             verify=self._verify_ssl,
         )
