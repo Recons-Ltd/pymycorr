@@ -1,6 +1,6 @@
 [project]
 name = "pymycorr"
-version = "0.2.0"
+version = "0.2.1"
 description = "Python client for fetching table data from the MyCorr API via Apache Arrow"
 readme = "README.md"
 license = { text = "MIT" }
@@ -29,11 +29,11 @@ jupyter = ["nest-asyncio>=1.5.0"]
 all = ["polars>=0.20.0", "nest-asyncio>=1.5.0"]
 
 [project.urls]
-Homepage = "https://github.com/sambaclab/mycorr-python"
-Documentation = "https://github.com/sambaclab/mycorr-python#readme"
-Repository = "https://github.com/sambaclab/mycorr-python"
-Issues = "https://github.com/sambaclab/mycorr-python/issues"
-Changelog = "https://github.com/sambaclab/mycorr-python/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/recons-ltd/pymycorr"
+Documentation = "https://github.com/recons-ltd/pymycorr#readme"
+Repository = "https://github.com/recons-ltd/pymycorr"
+Issues = "https://github.com/recons-ltd/pymycorr/issues"
+Changelog = "https://github.com/recons-ltd/pymycorr/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["hatchling"]
