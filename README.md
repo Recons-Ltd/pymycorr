@@ -1,11 +1,11 @@
 # pymycorr
 
 [![PyPI version](https://img.shields.io/pypi/v/pymycorr)](https://pypi.org/project/pymycorr/)
-[![CI](https://img.shields.io/github/actions/workflow/status/sambaclab/mycorr-python/ci.yml?branch=main&label=CI)](https://github.com/sambaclab/mycorr-python/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](https://github.com/sambaclab/mycorr-python/blob/main/pyproject.toml)
-[![License](https://img.shields.io/github/license/sambaclab/mycorr-python)](https://github.com/sambaclab/mycorr-python/blob/main/LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/recons-ltd/pymycorr/ci.yml?branch=main&label=CI)](https://github.com/recons-ltd/pymycorr/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](https://github.com/recons-ltd/pymycorr/blob/main/pyproject.toml)
+[![License](https://img.shields.io/github/license/recons-ltd/pymycorr)](https://github.com/recons-ltd/pymycorr/blob/main/LICENSE)
 
-Python client for fetching table data from the [MyCorr](https://alpha.mycorr.app) API using Apache Arrow for efficient data transfer.
+Python client for fetching table data from the [MyCorr](https://mycorr.app) API using Apache Arrow for efficient data transfer.
 
 > **Note:** The production API is coming soon. Set `MYCORR_API_URL` to your endpoint if you have early access.
 
