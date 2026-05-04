@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](https://github.com/recons-ltd/pymycorr/blob/main/pyproject.toml)
 [![License](https://img.shields.io/github/license/recons-ltd/pymycorr)](https://github.com/recons-ltd/pymycorr/blob/main/LICENSE)
 
-Python client for fetching table data from the [MyCorr](https://mycorr.app) API using Apache Arrow for efficient data transfer.
+Python client for fetching table data from the [MyCorr](https://space.mycorr.app) API using Apache Arrow for efficient data transfer.
 
 > **Note:** The production API is coming soon. Set `MYCORR_API_URL` to your endpoint if you have early access.
 

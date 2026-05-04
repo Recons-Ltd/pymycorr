@@ -1,6 +1,6 @@
 [project]
 name = "pymycorr"
-version = "0.2.3"
+version = "0.2.4"
 description = "Python client for fetching table data from the MyCorr API via Apache Arrow"
 readme = "README.md"
 license = { text = "MIT" }
@@ -73,6 +73,9 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 warn_unused_ignores = false
+# pyarrow ships partial stubs without typed signatures for ipc.* —
+# allow untyped calls into pyarrow rather than scattering per-line ignores.
+untyped_calls_exclude = ["pyarrow"]
 
 [[tool.mypy.overrides]]
 module = ["pyarrow.*", "httpx.*", "polars.*", "pandas.*", "nest_asyncio.*", "IPython.*"]
