@@ -1,6 +1,6 @@
 [project]
 name = "pymycorr"
-version = "0.2.3"
+version = "0.2.4"
 description = "Python client for fetching table data from the MyCorr API via Apache Arrow"
 readme = "README.md"
 license = { text = "MIT" }

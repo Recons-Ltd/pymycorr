@@ -73,7 +73,7 @@ class _StreamingBuffer:
 class MyCorr:
     """Client for fetching table data from API with Arrow format support."""
 
-    DEFAULT_URL = "https://mycorr.app"
+    DEFAULT_URL = "https://space.mycorr.app"
     _default_progress: bool | Literal["auto"]
 
     def __init__(

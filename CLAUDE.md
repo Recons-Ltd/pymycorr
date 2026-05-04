@@ -13,7 +13,7 @@ src/pymycorr/
 ```
 
 Single-file SDK. `client.py` is the whole thing. Three public methods:
-- `MyCorr()` — client init (token from env var or .env file, URL defaults to `mycorr.app`)
+- `MyCorr()` — client init (token from env var or .env file, URL defaults to `space.mycorr.app`)
 - `get_table(table_id)` — fetch table as pandas/polars DataFrame
 - `get_table_info(table_id)` — fetch table metadata as dict
 
@@ -54,7 +54,7 @@ Tests use `respx` for HTTP mocking and `pyarrow` for generating test Arrow data.
 
 1. Copy `.env.example` to `.env`
 2. Set `MYCORR_API_TOKEN` to your bearer token
-3. Optionally set `MYCORR_API_URL` for local dev (defaults to `https://mycorr.app`)
+3. Optionally set `MYCORR_API_URL` for local dev (defaults to `https://space.mycorr.app`)
 4. SSL verification is auto-disabled for `localhost` and `127.0.0.1` URLs
 
 ## Conventions

@@ -42,7 +42,7 @@ class TestMyCorrrInit:
         monkeypatch.setenv("MYCORR_API_TOKEN", "my-token")
 
         client = MyCorr()
-        assert client.url == "https://mycorr.app"
+        assert client.url == "https://space.mycorr.app"
         assert client.token == "my-token"
 
     def test_init_strips_trailing_slash(self) -> None:
@@ -304,7 +304,7 @@ class TestSSLVerification:
 
     def test_ssl_enabled_for_remote_url(self) -> None:
         """Test SSL verification is enabled for remote URLs."""
-        client = MyCorr(url="https://mycorr.app", token="test-token")
+        client = MyCorr(url="https://space.mycorr.app", token="test-token")
         assert client._verify_ssl is True
 
     def test_ssl_disabled_for_localhost(self) -> None:
