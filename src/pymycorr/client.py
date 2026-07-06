@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import queue
 import threading
-from collections.abc import AsyncIterator, Coroutine, Iterator
+from collections.abc import AsyncIterator, Coroutine, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from urllib.parse import urlparse
@@ -588,6 +589,125 @@ class MyCorr:
         if response.status_code != 200:
             self._handle_error_response(
                 response.status_code, response.text, "Error fetching table info: "
+            )
+
+        return cast(dict[str, Any], response.json())
+
+    @staticmethod
+    def _to_arrow_table(
+        data: pd.DataFrame | pl.DataFrame | pa.Table | pa.RecordBatch,
+    ) -> pa.Table:
+        """Coerce a DataFrame / Arrow value into a PyArrow Table with plain Utf8
+        strings.
+
+        Accepts a pyarrow Table/RecordBatch, a polars DataFrame, or a pandas
+        DataFrame. String columns are downcast from ``LargeUtf8``/``Utf8View`` to
+        plain ``Utf8`` — MyCorr persistence rejects the wide string variants that
+        polars (and arrow-backed pandas) emit natively.
+        """
+        if isinstance(data, pa.Table):
+            table = data
+        elif isinstance(data, pa.RecordBatch):
+            table = pa.Table.from_batches([data])
+        elif type(data).__module__.startswith("polars"):
+            table = data.to_arrow()
+        elif type(data).__module__.startswith("pandas"):
+            table = pa.Table.from_pandas(data, preserve_index=False)
+        else:
+            raise TypeError(
+                "data must be a pandas/polars DataFrame or a pyarrow Table/RecordBatch, "
+                f"got {type(data).__name__}"
+            )
+
+        def to_utf8(t: pa.DataType) -> pa.DataType:
+            if pa.types.is_large_string(t):
+                return pa.string()
+            if getattr(pa.types, "is_string_view", lambda _t: False)(t):
+                return pa.string()
+            return t
+
+        target = pa.schema([pa.field(f.name, to_utf8(f.type), f.nullable) for f in table.schema])
+        return table.cast(target) if target != table.schema else table
+
+    def create_table(
+        self,
+        model_id: str,
+        data: pd.DataFrame | pl.DataFrame | pa.Table | pa.RecordBatch,
+        *,
+        name: str,
+        primary_key: str | Sequence[str] | None = None,
+        labels: Sequence[str] | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a new table in a model from tabular data.
+
+        Encodes ``data`` as an Arrow IPC stream and uploads it to the write API;
+        the server persists the table and adds it to ``model_id``. Requires a
+        write-scoped token with edit access to the model.
+
+        Args:
+            model_id: The model the table is created in.
+            data: A pandas/polars DataFrame or a pyarrow Table/RecordBatch.
+            name: Name for the new table.
+            primary_key: Primary-key column name(s) — a single name or a sequence
+                for a composite key. Marking a key here is what lets the table be
+                diff-synced later.
+            labels: Catalog labels for the dataset. The public-datasets catalog
+                requires at least one; a label the catalog hasn't seen is created.
+            description: Optional dataset description, shown in the catalog and
+                the table details panel.
+
+        Returns:
+            Dict with the created ``model_id`` and ``table_id``.
+
+        Raises:
+            ValueError: If model_id or name is empty.
+            TypeError: If data is not a supported type.
+            TableNotFoundError: If the model is not found (404).
+            RateLimitError: If the API rate limit is exceeded (429).
+            QuotaExceededError: If the egress quota is exceeded (429).
+            TableAPIError: For other API errors.
+        """
+        if not model_id:
+            raise ValueError("model_id is required")
+        if not name:
+            raise ValueError("name is required")
+
+        if primary_key is None:
+            pk_cols: list[str] = []
+        elif isinstance(primary_key, str):
+            pk_cols = [primary_key]
+        else:
+            pk_cols = list(primary_key)
+
+        table = self._to_arrow_table(data)
+        sink = io.BytesIO()
+        with ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+
+        params: dict[str, Any] = {"name": name, "model": model_id}
+        if pk_cols:
+            params["pk"] = ",".join(pk_cols)
+        if labels:
+            params["labels"] = ",".join(labels)
+        if description:
+            params["description"] = description
+
+        response = httpx.post(
+            f"{self.url}/server/api/datasets/tables",
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/vnd.apache.arrow.stream",
+            },
+            params=params,
+            content=sink.getvalue(),
+            verify=self._verify_ssl,
+            timeout=httpx.Timeout(timeout=300.0, connect=30.0),
+        )
+
+        if response.status_code != 200:
+            self._handle_error_response(
+                response.status_code, response.text, "Error creating table: "
             )
 
         return cast(dict[str, Any], response.json())

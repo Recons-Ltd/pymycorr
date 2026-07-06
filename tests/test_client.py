@@ -599,3 +599,72 @@ class TestConnectionErrors:
         with pytest.raises(StreamingError, match="Connection error"):
             async for _ in client._stream_record_batches("test-table"):
                 pass
+
+
+class TestCreateTable:
+    """Tests for create_table."""
+
+    _URL = "https://test.example.com/api/server/api/datasets/tables"
+
+    @respx.mock
+    def test_create_from_arrow_table(self, client: MyCorr, sample_arrow_table: pa.Table) -> None:
+        """A pyarrow Table is uploaded as an IPC stream with the right params."""
+        route = respx.post(url__startswith=self._URL)
+        route.return_value = httpx.Response(200, json={"model_id": "mod-1", "table_id": "tab-1"})
+
+        result = client.create_table("mod-1", sample_arrow_table, name="People", primary_key="id")
+
+        assert result == {"model_id": "mod-1", "table_id": "tab-1"}
+        request = route.calls.last.request
+        assert request.headers["Content-Type"] == "application/vnd.apache.arrow.stream"
+        assert request.headers["Authorization"] == "Bearer test-token"
+        url = str(request.url)
+        assert "name=People" in url
+        assert "model=mod-1" in url
+        assert "pk=id" in url
+        # Body is a valid Arrow IPC stream round-tripping to the same rows.
+        sent = ipc.open_stream(request.content).read_all()
+        assert sent.num_rows == sample_arrow_table.num_rows
+
+    @respx.mock
+    def test_composite_primary_key_joined(
+        self, client: MyCorr, sample_arrow_table: pa.Table
+    ) -> None:
+        """A sequence primary key is sent comma-joined."""
+        route = respx.post(url__startswith=self._URL)
+        route.return_value = httpx.Response(200, json={"model_id": "m", "table_id": "t"})
+
+        client.create_table("m", sample_arrow_table, name="T", primary_key=["id", "name"])
+
+        assert "pk=id%2Cname" in str(route.calls.last.request.url)
+
+    @respx.mock
+    def test_large_utf8_downcast_to_utf8(self, client: MyCorr) -> None:
+        """LargeUtf8 columns are downcast to plain Utf8 before upload."""
+        wide = pa.table({"id": pa.array([1], pa.int64()), "s": pa.array(["x"], pa.large_utf8())})
+        route = respx.post(url__startswith=self._URL)
+        route.return_value = httpx.Response(200, json={"model_id": "m", "table_id": "t"})
+
+        client.create_table("m", wide, name="T", primary_key="id")
+
+        sent = ipc.open_stream(route.calls.last.request.content).read_all()
+        assert sent.schema.field("s").type == pa.string()
+
+    @respx.mock
+    def test_error_response_raises(self, client: MyCorr, sample_arrow_table: pa.Table) -> None:
+        """Non-200 responses raise through the shared error handler."""
+        route = respx.post(url__startswith=self._URL)
+        route.return_value = httpx.Response(404, json={"message": "model not found"})
+
+        with pytest.raises(TableNotFoundError):
+            client.create_table("nope", sample_arrow_table, name="T", primary_key="id")
+
+    def test_empty_model_id_raises(self, client: MyCorr, sample_arrow_table: pa.Table) -> None:
+        """An empty model_id is rejected before any request."""
+        with pytest.raises(ValueError, match="model_id is required"):
+            client.create_table("", sample_arrow_table, name="T")
+
+    def test_unsupported_data_type_raises(self, client: MyCorr) -> None:
+        """A non-tabular input is rejected with TypeError."""
+        with pytest.raises(TypeError, match="must be a pandas/polars DataFrame"):
+            client.create_table("m", {"id": [1]}, name="T")  # type: ignore[arg-type]

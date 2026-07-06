@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](https://github.com/recons-ltd/pymycorr/blob/main/pyproject.toml)
 [![License](https://img.shields.io/github/license/recons-ltd/pymycorr)](https://github.com/recons-ltd/pymycorr/blob/main/LICENSE)
 
-Python client for fetching table data from the [MyCorr](https://space.mycorr.app) API using Apache Arrow for efficient data transfer.
+Python client for reading and writing table data on the [MyCorr](https://space.mycorr.app) API using Apache Arrow for efficient data transfer.
 
 > **Note:** The production API is coming soon. Set `MYCORR_API_URL` to your endpoint if you have early access.
 
@@ -51,6 +51,10 @@ df = client.get_table("table-id", version="stable")
 # Get table metadata without fetching data
 info = client.get_table_info("table-id")
 print(info["schema"])
+
+# Create a new table in a model from a DataFrame (requires a write-scoped token)
+result = client.create_table("model-id", df, name="My Table", primary_key="id")
+print(result["table_id"])
 ```
 
 ### Progress Display
@@ -98,6 +102,19 @@ Get table schema and metadata.
 - `table_id`: Unique identifier for the table.
 - `version`: Version number (int) or alias (str).
 - Returns: Dictionary with table metadata including schema.
+
+#### `create_table(model_id, data, *, name, primary_key=None)`
+
+Create a new table in a model from tabular data. Encodes `data` as an Arrow IPC
+stream and uploads it to the write API; the server persists the table and adds
+it to the model. Requires a **write-scoped** token with edit access to the model.
+
+- `model_id`: The model the table is created in.
+- `data`: A pandas/polars DataFrame or a pyarrow `Table`/`RecordBatch`.
+- `name`: Name for the new table.
+- `primary_key`: Primary-key column name(s) — a single name or a sequence for a
+  composite key. Marking a key here is what lets the table be diff-synced later.
+- Returns: Dictionary with the created `model_id` and `table_id`.
 
 ## Exceptions
 

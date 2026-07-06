@@ -1,6 +1,6 @@
 # pymycorr
 
-Python SDK for fetching table data from the MyCorr API using Apache Arrow IPC streaming.
+Python SDK for reading and writing MyCorr table data using Apache Arrow IPC streaming.
 
 ## Architecture
 
@@ -12,10 +12,11 @@ src/pymycorr/
 └── __init__.py      # Public exports: MyCorr + all exception classes
 ```
 
-Single-file SDK. `client.py` is the whole thing. Three public methods:
+Single-file SDK. `client.py` is the whole thing. Four public methods:
 - `MyCorr()` — client init (token from env var or .env file, URL defaults to `space.mycorr.app`)
 - `get_table(table_id)` — fetch table as pandas/polars DataFrame
 - `get_table_info(table_id)` — fetch table metadata as dict
+- `create_table(model_id, data, *, name, primary_key=None)` — create a table in a model from a DataFrame/Arrow table (write-scoped token). Encodes an Arrow IPC stream, downcasting `LargeUtf8`/`Utf8View` → `Utf8` (persistence rejects the wide variants).
 
 Internal streaming uses httpx async + PyArrow IPC parsing. A `_StreamingBuffer` bridges async HTTP chunks to PyArrow's synchronous reader via a background thread.
 
@@ -24,6 +25,7 @@ Internal streaming uses httpx async + PyArrow IPC parsing. A `_StreamingBuffer` 
 The client appends these paths to the base URL:
 - `GET /data/table/stream` — Arrow IPC binary stream (used by `get_table`)
 - `GET /data/tableinfo` — JSON metadata (used by `get_table_info`)
+- `POST /server/api/datasets/tables` — upload an Arrow IPC stream to create a table (used by `create_table`)
 
 ## Exception Hierarchy
 

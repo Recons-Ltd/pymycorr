@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-01
+
+### Added
+
+- `MyCorr.create_table(model_id, data, *, name, primary_key=None)` — create a
+  new table in a model from a pandas/polars DataFrame or a pyarrow
+  Table/RecordBatch. Encodes the data as an Arrow IPC stream and uploads it to
+  the write API. String columns are downcast from `LargeUtf8`/`Utf8View` to
+  plain `Utf8` (MyCorr persistence rejects the wide variants). Requires a
+  write-scoped token with edit access to the target model.
+
 ## [0.2.0] - 2026-03-30
 
 ### Changed

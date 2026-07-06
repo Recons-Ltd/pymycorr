@@ -1,7 +1,7 @@
 [project]
 name = "pymycorr"
-version = "0.2.4"
-description = "Python client for fetching table data from the MyCorr API via Apache Arrow"
+version = "0.3.0"
+description = "Python client for reading and writing MyCorr table data via Apache Arrow"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Maximilian Schuberth", email = "maxs@recons-ltd.com" }]
@@ -80,6 +80,13 @@ untyped_calls_exclude = ["pyarrow"]
 [[tool.mypy.overrides]]
 module = ["pyarrow.*", "httpx.*", "polars.*", "pandas.*", "nest_asyncio.*", "IPython.*"]
 ignore_missing_imports = true
+
+# numpy (pulled in transitively) ships stubs using `type` statements that mypy
+# rejects under python_version = 3.10; skip analyzing them (incl. the .pyi).
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]
