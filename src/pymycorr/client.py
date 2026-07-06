@@ -636,6 +636,8 @@ class MyCorr:
         *,
         name: str,
         primary_key: str | Sequence[str] | None = None,
+        labels: Sequence[str] | None = None,
+        description: str | None = None,
     ) -> dict[str, Any]:
         """Create a new table in a model from tabular data.
 
@@ -650,6 +652,10 @@ class MyCorr:
             primary_key: Primary-key column name(s) — a single name or a sequence
                 for a composite key. Marking a key here is what lets the table be
                 diff-synced later.
+            labels: Catalog labels for the dataset. The public-datasets catalog
+                requires at least one; a label the catalog hasn't seen is created.
+            description: Optional dataset description, shown in the catalog and
+                the table details panel.
 
         Returns:
             Dict with the created ``model_id`` and ``table_id``.
@@ -682,6 +688,10 @@ class MyCorr:
         params: dict[str, Any] = {"name": name, "model": model_id}
         if pk_cols:
             params["pk"] = ",".join(pk_cols)
+        if labels:
+            params["labels"] = ",".join(labels)
+        if description:
+            params["description"] = description
 
         response = httpx.post(
             f"{self.url}/server/api/datasets/tables",
