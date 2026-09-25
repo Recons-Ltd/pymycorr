@@ -4,8 +4,13 @@ from importlib.metadata import version
 
 from pymycorr.client import MyCorr
 from pymycorr.exceptions import (
+    AuthenticationError,
+    InvalidDataError,
+    MyCorrDataWarning,
+    PermissionDeniedError,
     QuotaExceededError,
     RateLimitError,
+    StorageQuotaExceededError,
     StreamingError,
     TableAPIError,
     TableConversionError,
@@ -14,9 +19,14 @@ from pymycorr.exceptions import (
 
 __version__ = version("pymycorr")
 __all__ = [
+    "AuthenticationError",
+    "InvalidDataError",
     "MyCorr",
+    "MyCorrDataWarning",
+    "PermissionDeniedError",
     "QuotaExceededError",
     "RateLimitError",
+    "StorageQuotaExceededError",
     "StreamingError",
     "TableAPIError",
     "TableNotFoundError",

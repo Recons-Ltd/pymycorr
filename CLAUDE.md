@@ -16,7 +16,7 @@ Single-file SDK. `client.py` is the whole thing. Four public methods:
 - `MyCorr()` — client init (token from env var or .env file, URL defaults to `space.mycorr.app`)
 - `get_table(table_id)` — fetch table as pandas/polars DataFrame
 - `get_table_info(table_id)` — fetch table metadata as dict
-- `create_table(model_id, data, *, name, primary_key=None)` — create a table in a model from a DataFrame/Arrow table (write-scoped token). Encodes an Arrow IPC stream, downcasting `LargeUtf8`/`Utf8View` → `Utf8` (persistence rejects the wide variants).
+- `create_table(model_id, data, *, name, primary_key=None, ...)` — create a table in a model (write-scoped, org-bound token; member + editor of the model). Sends a `dry_run` first, then streams bounded record batches (`batch_bytes`) as a chunked Arrow IPC body. Accepts DataFrames, Arrow tables/batches/readers, or iterables of them. The server normalizes column types; lossy conversions come back as `MyCorrDataWarning`.
 
 Internal streaming uses httpx async + PyArrow IPC parsing. A `_StreamingBuffer` bridges async HTTP chunks to PyArrow's synchronous reader via a background thread.
 
@@ -25,17 +25,24 @@ Internal streaming uses httpx async + PyArrow IPC parsing. A `_StreamingBuffer` 
 The client appends these paths to the base URL:
 - `GET /data/table/stream` — Arrow IPC binary stream (used by `get_table`)
 - `GET /data/tableinfo` — JSON metadata (used by `get_table_info`)
-- `POST /server/api/datasets/tables` — upload an Arrow IPC stream to create a table (used by `create_table`)
+- `POST /server/api/model/{model_id}/tables` — upload an Arrow IPC stream to create a table (used by `create_table`; `?dry_run=true` checks without uploading)
 
 ## Exception Hierarchy
 
 ```
-TableAPIError (base)
+TableAPIError (base; .status_code, .code)
+├── AuthenticationError (401)
+├── PermissionDeniedError (403)
 ├── TableNotFoundError (404)
-├── QuotaExceededError (429)
+├── InvalidDataError (400/413/422)
+├── QuotaExceededError (429 egress)
+│   └── StorageQuotaExceededError (413 storage)
+├── RateLimitError (429 rate limit / too many uploads)
 ├── StreamingError (IPC parsing failures)
 └── TableConversionError (Arrow → DataFrame failures)
 ```
+
+`MyCorrDataWarning` (a `UserWarning`) reports lossy server-side conversions.
 
 ## Testing
 

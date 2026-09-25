@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import queue
 import threading
+import warnings
 from collections.abc import AsyncIterator, Coroutine, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 import pyarrow as pa
@@ -19,8 +21,13 @@ from dotenv import load_dotenv
 
 from pymycorr._progress import ProgressTracker
 from pymycorr.exceptions import (
+    AuthenticationError,
+    InvalidDataError,
+    MyCorrDataWarning,
+    PermissionDeniedError,
     QuotaExceededError,
     RateLimitError,
+    StorageQuotaExceededError,
     StreamingError,
     TableAPIError,
     TableConversionError,
@@ -32,6 +39,10 @@ if TYPE_CHECKING:
     import polars as pl
 
 T = TypeVar("T")
+
+#: Target size of one uploaded record batch — well under the server's cap
+#: (64 MiB by default), so a batch holds its size after IPC framing.
+DEFAULT_BATCH_BYTES = 16 * 1024 * 1024
 
 
 class _StreamingBuffer:
@@ -147,28 +158,58 @@ class MyCorr:
             body: The raw response body (bytes or str).
             context: Description of the operation for error messages.
 
+        Error bodies come in three shapes, all read here: ``{error: <code>,
+        error_description}`` (the upload door), ``{error: <code>, message,
+        ...figures}`` (quota refusals) and ``{status, error: <message>}``
+        (data-service reads).
+
         Raises:
+            AuthenticationError: If the status code is 401.
+            PermissionDeniedError: If the status code is 403.
             TableNotFoundError: If the status code is 404.
-            QuotaExceededError: If the status code is 429.
-            TableAPIError: For all other non-200 status codes.
+            StorageQuotaExceededError: If the status code is 413 for storage.
+            InvalidDataError: If the status code is 400, 422, or 413 for size.
+            RateLimitError: If the status code is 429 from a rate limiter.
+            QuotaExceededError: If the status code is 429 for egress.
+            TableAPIError: For all other non-2xx status codes.
         """
         try:
-            import json
-
             error_body = json.loads(body) if isinstance(body, bytes | str) else {}
         except Exception:
             error_body = {}
+        if not isinstance(error_body, dict):
+            error_body = {}
 
+        raw_code = error_body.get("error")
+        code = raw_code if isinstance(raw_code, str) else None
+        msg = (
+            error_body.get("error_description")
+            or error_body.get("message")
+            or code
+            or f"HTTP {status_code}"
+        )
+        # A data-service body puts its human message in `error`; only a
+        # snake_case word there is a code a caller could branch on.
+        if code is not None and not code.replace("_", "").isalnum():
+            code = None
+        text = f"{context}{msg}"
+
+        if status_code == 401:
+            raise AuthenticationError(text, status_code=401, code=code)
+        if status_code == 403:
+            raise PermissionDeniedError(text, status_code=403, code=code)
         if status_code == 404:
-            msg = error_body.get("message", "Not found")
-            raise TableNotFoundError(f"{context}{msg}")
+            raise TableNotFoundError(text, status_code=404, code=code)
+        if status_code == 413 and code != "upload_too_large":
+            raise StorageQuotaExceededError(error_body)
+        if status_code in (400, 413, 422):
+            raise InvalidDataError(text, status_code=status_code, code=code)
         if status_code == 429:
-            if error_body.get("error") == "rate_limit_exceeded":
+            if code in ("rate_limit_exceeded", "too_many_concurrent_uploads"):
                 raise RateLimitError(error_body)
             raise QuotaExceededError(error_body)
 
-        msg = error_body.get("message", f"HTTP {status_code}")
-        raise TableAPIError(f"{context}{msg}")
+        raise TableAPIError(text, status_code=status_code, code=code)
 
     @staticmethod
     def _build_version_params(
@@ -560,10 +601,16 @@ class MyCorr:
             version: Version number (int) or version alias (str, e.g., 'latest', 'stable').
 
         Returns:
-            Dictionary containing table snapshot (version, meta, schema).
+            Dictionary with ``table_id``, ``name``, ``active_rows``,
+            ``created_at``, ``schema_last_modified``, ``columns`` and
+            ``scheduled_for_deletion``: ``None`` for a live table, or the Unix
+            time (seconds) at which a table in the trash is permanently
+            deleted. Servers older than this field omit it, so read it with
+            ``info.get("scheduled_for_deletion")``.
 
         Raises:
             ValueError: If table_id is empty.
+            TypeError: If version has an invalid type.
             TableNotFoundError: If the table is not found (404).
             QuotaExceededError: If the egress quota is exceeded (429).
             TableAPIError: For other API-related errors.
@@ -571,13 +618,7 @@ class MyCorr:
         if not table_id:
             raise ValueError("Table ID is required")
 
-        params: dict[str, Any] = {
-            "table_id": table_id,
-            "scope": "read",
-            "version_alias": version if isinstance(version, str) else "latest",
-        }
-        if isinstance(version, int):
-            params["version"] = version
+        params = self._build_version_params(table_id, version)
 
         response = httpx.get(
             f"{self.url}/data/tableinfo",
@@ -594,84 +635,248 @@ class MyCorr:
         return cast(dict[str, Any], response.json())
 
     @staticmethod
-    def _to_arrow_table(
-        data: pd.DataFrame | pl.DataFrame | pa.Table | pa.RecordBatch,
-    ) -> pa.Table:
-        """Coerce a DataFrame / Arrow value into a PyArrow Table with plain Utf8
-        strings.
+    def _is_frame(value: Any) -> bool:
+        """Whether ``value`` is one table (rather than an iterable of them)."""
+        if isinstance(value, pa.Table | pa.RecordBatch):
+            return True
+        cls = type(value)
+        return cls.__module__.startswith(("pandas", "polars")) and cls.__name__ in (
+            "DataFrame",
+            "LazyFrame",
+        )
 
-        Accepts a pyarrow Table/RecordBatch, a polars DataFrame, or a pandas
-        DataFrame. String columns are downcast from ``LargeUtf8``/``Utf8View`` to
-        plain ``Utf8`` — MyCorr persistence rejects the wide string variants that
-        polars (and arrow-backed pandas) emit natively.
+    @staticmethod
+    def _rows_per_batch(nbytes: int, num_rows: int, batch_bytes: int) -> int:
+        """Rows that fit in about ``batch_bytes``, never fewer than one."""
+        if num_rows <= 0 or nbytes <= 0:
+            return max(num_rows, 1)
+        return max(1, (batch_bytes * num_rows) // nbytes)
+
+    @classmethod
+    def _frame_batches(
+        cls,
+        frame: Any,
+        batch_bytes: int,
+        schema: pa.Schema | None = None,
+    ) -> tuple[pa.Schema, Iterator[pa.RecordBatch]]:
+        """One table as record batches of about ``batch_bytes`` each, cast to
+        ``schema`` when one is given.
+
+        pandas is converted slice by slice, so a large frame is never copied to
+        Arrow whole: pandas → Arrow would otherwise hand the entire frame over as
+        ONE batch, which the server refuses above its batch cap.
         """
-        if isinstance(data, pa.Table):
-            table = data
-        elif isinstance(data, pa.RecordBatch):
-            table = pa.Table.from_batches([data])
-        elif type(data).__module__.startswith("polars"):
-            table = data.to_arrow()
-        elif type(data).__module__.startswith("pandas"):
-            table = pa.Table.from_pandas(data, preserve_index=False)
+        module = type(frame).__module__
+        if isinstance(frame, pa.RecordBatch):
+            table = pa.Table.from_batches([frame])
+        elif isinstance(frame, pa.Table):
+            table = frame
+        elif module.startswith("polars"):
+            if not hasattr(frame, "to_arrow"):
+                raise TypeError(
+                    "a polars LazyFrame must be collected first: pass lf.collect(), "
+                    "or an iterator of DataFrames for data larger than memory"
+                )
+            table = frame.to_arrow()
+        elif module.startswith("pandas"):
+            return cls._pandas_batches(frame, batch_bytes, schema)
         else:
             raise TypeError(
-                "data must be a pandas/polars DataFrame or a pyarrow Table/RecordBatch, "
-                f"got {type(data).__name__}"
+                "data must be a pandas/polars DataFrame, a pyarrow Table/RecordBatch/"
+                f"RecordBatchReader, or an iterable of those; got {type(frame).__name__}"
             )
+        if schema is not None and not table.schema.equals(schema):
+            table = table.cast(schema)
+        rows = cls._rows_per_batch(table.nbytes, table.num_rows, batch_bytes)
+        return table.schema, iter(table.to_batches(max_chunksize=rows))
 
-        def to_utf8(t: pa.DataType) -> pa.DataType:
-            if pa.types.is_large_string(t):
-                return pa.string()
-            if getattr(pa.types, "is_string_view", lambda _t: False)(t):
-                return pa.string()
-            return t
+    @classmethod
+    def _pandas_batches(
+        cls,
+        df: pd.DataFrame,
+        batch_bytes: int,
+        schema: pa.Schema | None,
+    ) -> tuple[pa.Schema, Iterator[pa.RecordBatch]]:
+        if schema is None:
+            # From the whole frame, so an object column whose first slice is all
+            # nulls still gets its real type.
+            schema = pa.Schema.from_pandas(df, preserve_index=False)
+        target = schema
+        n = len(df)
 
-        target = pa.schema([pa.field(f.name, to_utf8(f.type), f.nullable) for f in table.schema])
-        return table.cast(target) if target != table.schema else table
+        def convert(part: pd.DataFrame) -> list[pa.RecordBatch]:
+            table = pa.Table.from_pandas(part, schema=target, preserve_index=False)
+            converted: list[pa.RecordBatch] = table.to_batches()
+            return converted
+
+        def batches() -> Iterator[pa.RecordBatch]:
+            if n == 0:
+                yield from convert(df)
+                return
+            per_row = max(1, int(df.memory_usage(deep=True, index=False).sum()) // n)
+            rows = max(1, batch_bytes // per_row)
+            for start in range(0, n, rows):
+                yield from convert(df.iloc[start : start + rows])
+
+        return target, batches()
+
+    @classmethod
+    def _upload_batches(
+        cls,
+        data: Any,
+        batch_bytes: int,
+    ) -> tuple[pa.Schema, Iterator[pa.RecordBatch], int | None]:
+        """``data`` as ``(schema, bounded batches, in-memory size)``.
+
+        The size is the Arrow buffers' ``nbytes`` when the whole input is at
+        hand — a floor for the IPC stream, so an upload whose data is already
+        larger than the server's cap can be refused before it starts. ``None``
+        for a reader or iterable, whose size is not known up front.
+        """
+        if isinstance(data, pa.RecordBatchReader):
+            reader = data
+            schema = reader.schema
+
+            def from_reader() -> Iterator[pa.RecordBatch]:
+                for batch in reader:
+                    yield from cls._frame_batches(batch, batch_bytes, schema)[1]
+
+            return schema, from_reader(), None
+
+        if cls._is_frame(data):
+            schema, batches = cls._frame_batches(data, batch_bytes)
+            nbytes = data.nbytes if isinstance(data, pa.Table | pa.RecordBatch) else None
+            return schema, batches, nbytes
+
+        if isinstance(data, str | bytes | dict) or not hasattr(data, "__iter__"):
+            raise TypeError(
+                "data must be a pandas/polars DataFrame, a pyarrow Table/RecordBatch/"
+                f"RecordBatchReader, or an iterable of those; got {type(data).__name__}"
+            )
+        items = iter(data)
+        try:
+            first = next(items)
+        except StopIteration:
+            raise ValueError("data is an empty iterable: pass at least one table") from None
+        schema, first_batches = cls._frame_batches(first, batch_bytes)
+
+        def from_iterable() -> Iterator[pa.RecordBatch]:
+            yield from first_batches
+            for position, item in enumerate(items, start=2):
+                try:
+                    _, batches = cls._frame_batches(item, batch_bytes, schema)
+                    yield from batches
+                except (pa.ArrowInvalid, pa.ArrowTypeError, ValueError) as e:
+                    raise ValueError(
+                        f"table {position} of the iterable does not match the first "
+                        f"table's schema: {e}"
+                    ) from e
+
+        return schema, from_iterable(), None
+
+    @staticmethod
+    def _ipc_stream(
+        schema: pa.Schema,
+        batches: Iterator[pa.RecordBatch],
+        tracker: ProgressTracker,
+    ) -> Iterator[bytes]:
+        """An Arrow IPC stream, one chunk per record batch — the request body,
+        produced as it is sent so no more than one batch is held at a time."""
+        sink = io.BytesIO()
+
+        def drain() -> bytes:
+            data = sink.getvalue()
+            sink.seek(0)
+            sink.truncate(0)
+            return data
+
+        with ipc.new_stream(sink, schema) as writer:
+            for batch in batches:
+                writer.write_batch(batch)
+                chunk = drain()
+                tracker.update(len(chunk))
+                # An empty chunk would end a chunked body early.
+                if chunk:
+                    yield chunk
+        tail = drain()
+        if tail:
+            tracker.update(len(tail))
+            yield tail
 
     def create_table(
         self,
         model_id: str,
-        data: pd.DataFrame | pl.DataFrame | pa.Table | pa.RecordBatch,
+        data: Any,
         *,
         name: str,
         primary_key: str | Sequence[str] | None = None,
         labels: Sequence[str] | None = None,
         description: str | None = None,
+        batch_bytes: int = DEFAULT_BATCH_BYTES,
+        progress: bool | Literal["auto"] | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> dict[str, Any]:
-        """Create a new table in a model from tabular data.
+        """Create a new table in a model by streaming tabular data to MyCorr.
 
-        Encodes ``data`` as an Arrow IPC stream and uploads it to the write API;
-        the server persists the table and adds it to ``model_id``. Requires a
-        write-scoped token with edit access to the model.
+        The data is sent as an Arrow IPC stream in record batches of about
+        ``batch_bytes`` each, produced while the request is sent — the whole
+        upload is never held in memory. The server converts each column to the
+        nearest MyCorr type (``large_string``, ``large_list``, categoricals,
+        timezone-aware timestamps and the like need no preparation); a
+        conversion that loses information is reported as a
+        :class:`MyCorrDataWarning`.
+
+        Requires a write-scoped token bound to the model's organization, edit
+        access to the model and membership of its organization (a catalog model
+        takes the catalog-manager role instead). The upload is checked before
+        any data is sent, and is refused if it does not fit in the
+        organization's remaining storage. Not retried automatically: creating a
+        table is not idempotent.
 
         Args:
             model_id: The model the table is created in.
-            data: A pandas/polars DataFrame or a pyarrow Table/RecordBatch.
+            data: A pandas or polars DataFrame, a pyarrow ``Table``,
+                ``RecordBatch`` or ``RecordBatchReader``, or an iterable of
+                DataFrames/Tables/RecordBatches sharing one schema — for data
+                larger than memory.
             name: Name for the new table.
-            primary_key: Primary-key column name(s) — a single name or a sequence
-                for a composite key. Marking a key here is what lets the table be
-                diff-synced later.
-            labels: Catalog labels for the dataset. The public-datasets catalog
-                requires at least one; a label the catalog hasn't seen is created.
-            description: Optional dataset description, shown in the catalog and
+            primary_key: Primary-key column name(s) — a single name or a
+                sequence for a composite key. Marking a key here is what lets
+                the table be diff-synced later.
+            labels: Catalog labels for the table.
+            description: Optional table description, shown in the catalog and
                 the table details panel.
+            batch_bytes: Target size of each record batch. The server refuses
+                batches over its own cap (64 MiB by default).
+            progress: Show upload progress. None uses the client default.
+            timeout: Request timeout; by default 30s to connect, 300s between
+                writes and 1800s for the server to finish after the last byte.
 
         Returns:
-            Dict with the created ``model_id`` and ``table_id``.
+            Dict with ``model_id``, ``table_id``, ``labels`` and ``warnings``.
 
         Raises:
-            ValueError: If model_id or name is empty.
+            ValueError: If an argument is empty or invalid, or a table in an
+                iterable does not match the first one's schema.
             TypeError: If data is not a supported type.
-            TableNotFoundError: If the model is not found (404).
-            RateLimitError: If the API rate limit is exceeded (429).
-            QuotaExceededError: If the egress quota is exceeded (429).
+            AuthenticationError: If the token is invalid or not bound to an
+                organization (401).
+            PermissionDeniedError: If the token may not create tables in this
+                model (403) — see its ``code``.
+            StorageQuotaExceededError: If the upload does not fit in the
+                organization's storage (413).
+            InvalidDataError: If the server refuses the data (400/413/422) —
+                see its ``code``.
+            RateLimitError: If too many uploads are running or have started
+                this hour (429); ``retry_after`` says when to try again.
             TableAPIError: For other API errors.
         """
         if not model_id:
             raise ValueError("model_id is required")
-        if not name:
+        if not name or not name.strip():
             raise ValueError("name is required")
+        if batch_bytes <= 0:
+            raise ValueError("batch_bytes must be positive")
 
         if primary_key is None:
             pk_cols: list[str] = []
@@ -680,12 +885,7 @@ class MyCorr:
         else:
             pk_cols = list(primary_key)
 
-        table = self._to_arrow_table(data)
-        sink = io.BytesIO()
-        with ipc.new_stream(sink, table.schema) as writer:
-            writer.write_table(table)
-
-        params: dict[str, Any] = {"name": name, "model": model_id}
+        params: dict[str, Any] = {"name": name}
         if pk_cols:
             params["pk"] = ",".join(pk_cols)
         if labels:
@@ -693,21 +893,85 @@ class MyCorr:
         if description:
             params["description"] = description
 
-        response = httpx.post(
-            f"{self.url}/server/api/datasets/tables",
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/vnd.apache.arrow.stream",
-            },
-            params=params,
-            content=sink.getvalue(),
-            verify=self._verify_ssl,
-            timeout=httpx.Timeout(timeout=300.0, connect=30.0),
-        )
+        # Before any request, so unsupported input fails without a round-trip.
+        schema, batches, known_bytes = self._upload_batches(data, batch_bytes)
 
-        if response.status_code != 200:
+        url = f"{self.url}/server/api/model/{quote(model_id, safe='')}/tables"
+        headers = {"Authorization": f"Bearer {self.token}"}
+
+        # Ask first: a body is sent whole before its answer is read, so a refused
+        # upload would otherwise learn why only after sending all of it.
+        check = httpx.post(
+            url,
+            headers=headers,
+            params={**params, "dry_run": "true"},
+            verify=self._verify_ssl,
+            timeout=httpx.Timeout(timeout=60.0, connect=30.0),
+        )
+        if check.status_code != 200:
+            self._handle_error_response(check.status_code, check.text, "Error creating table: ")
+        grant = check.json()
+
+        max_bytes = grant.get("max_bytes")
+        if known_bytes is not None and isinstance(max_bytes, int) and known_bytes > max_bytes:
+            detail = {
+                "error": "storage_quota_exceeded"
+                if grant.get("limit_kind") == "storage_quota"
+                else "upload_too_large",
+                "message": f"this upload is at least {known_bytes} bytes; at most "
+                f"{max_bytes} may be sent",
+                "requested_bytes": known_bytes,
+            }
+            self._handle_error_response(413, json.dumps(detail), "Error creating table: ")
+
+        effective_progress: bool | Literal["auto"] = (
+            progress if progress is not None else self._default_progress
+        )
+        tracker = ProgressTracker(effective_progress, desc=f"Uploading {name}")
+        failure: list[BaseException] = []
+
+        def body() -> Iterator[bytes]:
+            try:
+                yield from self._ipc_stream(schema, batches, tracker)
+            except BaseException as e:
+                failure.append(e)
+                raise
+
+        try:
+            with tracker:
+                response = httpx.post(
+                    url,
+                    headers={**headers, "Content-Type": "application/vnd.apache.arrow.stream"},
+                    params=params,
+                    content=body(),
+                    verify=self._verify_ssl,
+                    timeout=timeout
+                    if timeout is not None
+                    else httpx.Timeout(connect=30.0, read=1800.0, write=300.0, pool=30.0),
+                )
+        except Exception as e:
+            # The data failed while being streamed: that is the error to report,
+            # not the aborted request it caused.
+            if failure:
+                raise failure[0] from None
+            if isinstance(e, httpx.HTTPError):
+                raise TableAPIError(f"Error creating table: upload failed: {e}") from e
+            raise
+
+        if response.status_code not in (200, 201):
             self._handle_error_response(
                 response.status_code, response.text, "Error creating table: "
             )
+        tracker.print_summary()
 
-        return cast(dict[str, Any], response.json())
+        result = cast(dict[str, Any], response.json())
+        for w in result.get("warnings") or []:
+            if isinstance(w, dict):
+                warnings.warn(
+                    f"column {w.get('column_name')!r} was converted from "
+                    f"{w.get('original_arrow_type')} to {w.get('normalized_arrow_type')}: "
+                    f"{w.get('reason')}",
+                    MyCorrDataWarning,
+                    stacklevel=2,
+                )
+        return result

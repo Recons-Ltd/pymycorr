@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-25
+
+Requires a MyCorr server with the table-upload door
+(`POST /server/api/model/{model_id}/tables`).
+
+### Changed
+
+- `create_table` streams its data in bounded record batches (`batch_bytes`,
+  16 MiB by default) instead of building the whole upload in memory, and posts
+  to `/server/api/model/{model_id}/tables` (the old
+  `/server/api/datasets/tables` no longer exists on the server).
+- `create_table` asks the server first (a dry run) and raises a refusal before
+  sending any data; data already larger than the server's cap is refused
+  without being sent.
+- `create_table` no longer downcasts string columns: the server now converts
+  every column to the nearest MyCorr type itself.
+- Error messages use the server's own description, and every `TableAPIError`
+  carries `status_code` and the server's `code`.
+- `get_table_info` sends only `version` for an integer version (it also sent
+  `version_alias=latest`).
+
+### Added
+
+- `create_table` accepts a pyarrow `RecordBatchReader` or an iterable of
+  DataFrames/Tables/RecordBatches for data larger than memory, plus `labels`,
+  `description`, `batch_bytes`, `progress` and `timeout`.
+- `AuthenticationError` (401), `PermissionDeniedError` (403), `InvalidDataError`
+  (400/413/422) and `StorageQuotaExceededError` (413).
+- `MyCorrDataWarning`, raised for each column the server converted lossily.
+- `get_table_info` documents `scheduled_for_deletion`: `None`, or when a table in
+  the trash is permanently deleted.
+
 ## [0.3.0] - 2026-07-01
 
 ### Added
