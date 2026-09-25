@@ -131,7 +131,7 @@ Get table schema and metadata.
   live table, or the Unix time (seconds) at which a table in the trash is
   permanently deleted. Older servers omit the field; read it with `.get()`.
 
-#### `create_table(model_id, data, *, name, primary_key=None, labels=None, description=None, batch_bytes=16 MiB, progress=None, timeout=None)`
+#### `create_table(model_id, data, *, name, primary_key=None, description=None, batch_bytes=16 MiB, progress=None, timeout=None)`
 
 Create a new table in a model by streaming tabular data. Requires a
 **write-scoped** token bound to the model's organization, edit access to the
@@ -146,14 +146,17 @@ not idempotent.
 - `name`: Name for the new table.
 - `primary_key`: Primary-key column name(s) — a single name or a sequence for a
   composite key. Marking a key here is what lets the table be diff-synced later.
-- `labels`: Catalog labels for the table.
-- `description`: Table description, shown in the catalog and the details panel.
+- `description`: Table description, shown in the catalog and the details panel
+  (at most 10,000 bytes). Sent inside the upload as the Arrow schema metadata key
+  `mycorr.description`, never in the URL.
 - `batch_bytes`: Target size of each uploaded record batch (the server refuses
   batches over 64 MiB).
 - `progress`: Override the client's progress setting for this upload.
 - `timeout`: Request timeout (default: 30s connect, 300s between writes, 1800s
   for the server to finish after the last byte).
-- Returns: Dictionary with `model_id`, `table_id`, `labels` and `warnings`.
+- Returns: Dictionary with `model_id`, `table_id`, `description` and `warnings`.
+  A success means the table exists with its description; if saving it fails,
+  the server removes the table.
 
 ## Exceptions
 

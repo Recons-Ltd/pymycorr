@@ -645,7 +645,7 @@ class TestCreateTable:
     """Tests for create_table: a dry run, then a streamed Arrow IPC body."""
 
     _URL = "https://test.example.com/api/server/api/model/mod-1/tables"
-    _CREATED = {"model_id": "mod-1", "table_id": "tab-1", "labels": [], "warnings": []}
+    _CREATED = {"model_id": "mod-1", "table_id": "tab-1", "description": None, "warnings": []}
 
     def _routes(
         self,
@@ -686,7 +686,7 @@ class TestCreateTable:
         assert _sent_stream(request).equals(sample_arrow_table)
 
     @respx.mock
-    def test_composite_primary_key_and_labels_are_joined(
+    def test_composite_primary_key_is_joined(
         self, client: MyCorr, sample_arrow_table: pa.Table
     ) -> None:
         _, upload = self._routes()
@@ -696,13 +696,35 @@ class TestCreateTable:
             sample_arrow_table,
             name="T",
             primary_key=["id", "name"],
-            labels=["mining", "gold"],
             progress=False,
         )
 
-        url = str(upload.calls.last.request.url)
-        assert "pk=id%2Cname" in url
-        assert "labels=mining%2Cgold" in url
+        assert "pk=id%2Cname" in str(upload.calls.last.request.url)
+
+    @respx.mock
+    def test_the_description_travels_in_the_body_not_the_url(
+        self, client: MyCorr, sample_arrow_table: pa.Table
+    ) -> None:
+        dry, upload = self._routes()
+
+        client.create_table(
+            "mod-1",
+            sample_arrow_table,
+            name="T",
+            description="  Quarterly output — ünïcode & all.  ",
+            progress=False,
+        )
+
+        for route in (dry, upload):
+            assert "description" not in str(route.calls.last.request.url)
+        sent = ipc.open_stream(upload.calls.last.request.content).schema
+        assert sent.metadata[b"mycorr.description"].decode() == "Quarterly output — ünïcode & all."
+
+    def test_an_oversized_description_is_refused_before_any_request(
+        self, client: MyCorr, sample_arrow_table: pa.Table
+    ) -> None:
+        with pytest.raises(ValueError, match="at most 10000"):
+            client.create_table("mod-1", sample_arrow_table, name="T", description="é" * 5_001)
 
     @respx.mock
     def test_a_large_table_is_sent_in_bounded_batches(self, client: MyCorr) -> None:

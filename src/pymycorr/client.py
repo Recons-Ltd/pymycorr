@@ -44,6 +44,12 @@ T = TypeVar("T")
 #: (64 MiB by default), so a batch holds its size after IPC framing.
 DEFAULT_BATCH_BYTES = 16 * 1024 * 1024
 
+#: The Arrow schema metadata key an upload carries its table description under.
+TABLE_DESCRIPTION_METADATA_KEY = "mycorr.description"
+
+#: Longest table description the server stores.
+MAX_DESCRIPTION_BYTES = 10_000
+
 
 class _StreamingBuffer:
     """Bridges async HTTP chunks to PyArrow's synchronous read() interface."""
@@ -810,7 +816,6 @@ class MyCorr:
         *,
         name: str,
         primary_key: str | Sequence[str] | None = None,
-        labels: Sequence[str] | None = None,
         description: str | None = None,
         batch_bytes: int = DEFAULT_BATCH_BYTES,
         progress: bool | Literal["auto"] | None = None,
@@ -843,9 +848,10 @@ class MyCorr:
             primary_key: Primary-key column name(s) — a single name or a
                 sequence for a composite key. Marking a key here is what lets
                 the table be diff-synced later.
-            labels: Catalog labels for the table.
             description: Optional table description, shown in the catalog and
-                the table details panel.
+                the table details panel — at most 10,000 bytes. Sent inside the
+                upload (as the Arrow schema metadata key ``mycorr.description``),
+                never in the URL.
             batch_bytes: Target size of each record batch. The server refuses
                 batches over its own cap (64 MiB by default).
             progress: Show upload progress. None uses the client default.
@@ -853,7 +859,9 @@ class MyCorr:
                 writes and 1800s for the server to finish after the last byte.
 
         Returns:
-            Dict with ``model_id``, ``table_id``, ``labels`` and ``warnings``.
+            Dict with ``model_id``, ``table_id``, ``description`` and
+            ``warnings``. A success means the table exists with its
+            description; if saving it fails, the server removes the table.
 
         Raises:
             ValueError: If an argument is empty or invalid, or a table in an
@@ -877,6 +885,12 @@ class MyCorr:
             raise ValueError("name is required")
         if batch_bytes <= 0:
             raise ValueError("batch_bytes must be positive")
+        description = description.strip() if description else None
+        if description and len(description.encode()) > MAX_DESCRIPTION_BYTES:
+            raise ValueError(
+                f"description is {len(description.encode())} bytes; at most "
+                f"{MAX_DESCRIPTION_BYTES} are allowed"
+            )
 
         if primary_key is None:
             pk_cols: list[str] = []
@@ -888,13 +902,14 @@ class MyCorr:
         params: dict[str, Any] = {"name": name}
         if pk_cols:
             params["pk"] = ",".join(pk_cols)
-        if labels:
-            params["labels"] = ",".join(labels)
-        if description:
-            params["description"] = description
 
         # Before any request, so unsupported input fails without a round-trip.
         schema, batches, known_bytes = self._upload_batches(data, batch_bytes)
+        if description:
+            # In the body, not the URL: the server reads it off the schema message.
+            metadata = dict(schema.metadata or {})
+            metadata[TABLE_DESCRIPTION_METADATA_KEY.encode()] = description.encode()
+            schema = schema.with_metadata(metadata)
 
         url = f"{self.url}/server/api/model/{quote(model_id, safe='')}/tables"
         headers = {"Authorization": f"Bearer {self.token}"}
